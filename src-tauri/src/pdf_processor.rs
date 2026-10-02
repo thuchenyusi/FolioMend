@@ -208,7 +208,36 @@ fn get_page_boxes(doc: &Document, page_id: ObjectId) -> Option<(BoxRect, BoxRect
 }
 
 fn get_visible_page_width(doc: &Document, page_id: ObjectId) -> Option<f64> {
-    get_page_boxes(doc, page_id).map(|(_, crop_box, _)| crop_box.width())
+    let (_, crop_box, _) = get_page_boxes(doc, page_id)?;
+    Some(if page_has_quarter_turn(doc, page_id) {
+        crop_box.height()
+    } else {
+        crop_box.width()
+    })
+}
+
+// Rotate is inheritable. A quarter turn swaps the displayed width and height.
+fn page_has_quarter_turn(doc: &Document, mut node_id: ObjectId) -> bool {
+    let mut visited = BTreeSet::new();
+    while visited.insert(node_id) {
+        let Ok(dict) = doc.get_dictionary(node_id) else {
+            break;
+        };
+        if let Ok(value) = dict.get(b"Rotate") {
+            let rotation = doc
+                .dereference(value)
+                .ok()
+                .and_then(|(_, value)| value.as_i64().ok())
+                .unwrap_or(0)
+                .rem_euclid(360);
+            return rotation == 90 || rotation == 270;
+        }
+        let Some(parent) = dict.get(b"Parent").ok().and_then(|v| v.as_reference().ok()) else {
+            break;
+        };
+        node_id = parent;
+    }
+    false
 }
 
 /// 使用设计文档中的 P95 稳健策略计算目标宽度。
@@ -307,7 +336,14 @@ fn transform_page_geometry(
     let (media_box, crop_box, has_crop_box) =
         get_page_boxes(doc, page_id).ok_or("无法获取页面框")?;
     let scale = target_visible_width
-        .map(|target| target / crop_box.width())
+        .map(|target| {
+            target
+                / if page_has_quarter_turn(doc, page_id) {
+                    crop_box.height()
+                } else {
+                    crop_box.width()
+                }
+        })
         .unwrap_or(1.0);
     let transform = PageTransform {
         scale,
@@ -1333,6 +1369,59 @@ mod tests {
         assert!((media.width() - 450.0).abs() < 0.01);
         assert!((media.height() - 600.0).abs() < 0.01);
         assert!((media.y1 - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn rotated_pages_normalize_displayed_width_in_both_crop_modes() {
+        for rotation in [0, 90, 180, 270, -90, 450] {
+            for mode in [CropBoxMode::AlignVisible, CropBoxMode::TrueCrop] {
+                let (mut doc, page_id) = cropped_page_document();
+                doc.get_dictionary_mut(page_id)
+                    .unwrap()
+                    .set("Rotate", rotation);
+                let quarter_turn =
+                    rotation == 90 || rotation == 270 || rotation == -90 || rotation == 450;
+                let original_width = if quarter_turn { 600.0 } else { 450.0 };
+                assert_eq!(get_visible_page_width(&doc, page_id), Some(original_width));
+                let transform = transform_page_geometry(&mut doc, page_id, Some(900.0), mode)
+                    .unwrap()
+                    .unwrap();
+                assert!((transform.scale - 900.0 / original_width).abs() < 0.0001);
+                assert!((get_visible_page_width(&doc, page_id).unwrap() - 900.0).abs() < 0.01);
+                assert_eq!(
+                    doc.get_dictionary(page_id)
+                        .unwrap()
+                        .get(b"Rotate")
+                        .unwrap()
+                        .as_i64()
+                        .unwrap(),
+                    rotation
+                );
+                let (media, crop, _) = get_page_boxes(&doc, page_id).unwrap();
+                assert_eq!(
+                    media.approximately_equals(crop),
+                    mode == CropBoxMode::TrueCrop
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn displayed_width_respects_inherited_rotation_and_page_override() {
+        let (mut doc, page_id) = cropped_page_document();
+        let parent = doc
+            .get_dictionary(page_id)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        doc.get_dictionary_mut(parent).unwrap().set("Rotate", 90);
+        assert_eq!(get_visible_page_width(&doc, page_id), Some(600.0));
+        transform_page_geometry(&mut doc, page_id, Some(900.0), CropBoxMode::AlignVisible).unwrap();
+        assert_eq!(get_visible_page_width(&doc, page_id), Some(900.0));
+        doc.get_dictionary_mut(page_id).unwrap().set("Rotate", 0);
+        assert_eq!(get_visible_page_width(&doc, page_id), Some(675.0));
     }
 
     #[test]
