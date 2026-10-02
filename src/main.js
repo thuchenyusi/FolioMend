@@ -19,6 +19,11 @@ const resultsSection = document.getElementById("results-section");
 const resultsList = document.getElementById("results-list");
 const optionCompressImages = document.getElementById("option-compress-images");
 const optionNormalizePages = document.getElementById("option-normalize-pages");
+const optionRepairBookmarks = document.getElementById("option-repair-bookmarks");
+try { optionRepairBookmarks.checked = localStorage.getItem("repairBookmarks") !== "false"; } catch (_) {}
+optionRepairBookmarks.addEventListener("change", () => {
+    try { localStorage.setItem("repairBookmarks", String(optionRepairBookmarks.checked)); } catch (_) {}
+});
 const cropMode = document.getElementById("crop-mode");
 const cropModeHint = document.getElementById("crop-mode-hint");
 
@@ -27,6 +32,7 @@ function getProcessingOptions() {
         compressImages: optionCompressImages.checked,
         normalizePages: optionNormalizePages.checked,
         cropMode: cropMode.value,
+        repairBookmarks: optionRepairBookmarks.checked,
     };
 }
 
@@ -151,6 +157,7 @@ btnProcess.addEventListener("click", async () => {
     optionCompressImages.disabled = true;
     optionNormalizePages.disabled = true;
     cropMode.disabled = true;
+    optionRepairBookmarks.disabled = true;
     progressSection.style.display = "block";
     resultsSection.style.display = "none";
     progressFill.style.width = "0%";
@@ -203,6 +210,7 @@ btnProcess.addEventListener("click", async () => {
         optionCompressImages.disabled = false;
         optionNormalizePages.disabled = false;
         cropMode.disabled = false;
+        optionRepairBookmarks.disabled = false;
     }
 });
 
@@ -240,6 +248,7 @@ function showResults(results) {
                         ${normalizationDetail}<br>
                         ${cropDetail}<br>
                         ${imageDetail}<br>
+                        书签检测：${escapeHtml(r.bookmark_status || "未启用")}<br>
                         ${sizeDetail}
                         输出文件: ${escapeHtml(r.output_path)}
                     </div>

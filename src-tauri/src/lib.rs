@@ -83,10 +83,15 @@ async fn process_pdfs(
                 };
 
                 let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    pdf_processor::process_pdf_with_options_and_progress(
+                    pdf_processor::process_pdf_with_bookmark_confirmation(
                         path,
                         options,
                         &mut report_progress,
+                        &mut || app.dialog()
+                            .message(format!("{}\n\n检测到异常书签结构，且含有书签或无法确认书签内容。清理会移除所有现有书签，但保留页面内容，只写入输出副本。是否清理？取消将保留书签并继续其他处理。", path))
+                            .title("修复异常书签")
+                            .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom("清理书签".into(), "保留书签".into()))
+                            .blocking_show(),
                     )
                 })) {
                     Ok(result) => result,
@@ -103,6 +108,7 @@ async fn process_pdfs(
                         skipped_images: 0,
                         original_bytes: 0,
                         output_bytes: 0,
+                        bookmark_status: "未完成检测".to_string(),
                         success: false,
                         error: Some("处理该 PDF 时发生内部异常，已跳过此文件".to_string()),
                     },
@@ -145,6 +151,7 @@ async fn process_pdfs(
             skipped_images: 0,
             original_bytes: 0,
             output_bytes: 0,
+            bookmark_status: "未完成检测".to_string(),
             success: false,
             error: Some(format!("处理任务失败: {}", e)),
         }]

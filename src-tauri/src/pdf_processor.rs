@@ -21,6 +21,7 @@ pub struct ProcessResult {
     pub skipped_images: usize,
     pub original_bytes: u64,
     pub output_bytes: u64,
+    pub bookmark_status: String,
     pub success: bool,
     pub error: Option<String>,
 }
@@ -49,6 +50,7 @@ pub struct ProcessOptions {
     pub compress_images: bool,
     pub normalize_pages: bool,
     pub crop_mode: CropBoxMode,
+    pub repair_bookmarks: bool,
 }
 
 impl Default for ProcessOptions {
@@ -57,6 +59,7 @@ impl Default for ProcessOptions {
             compress_images: true,
             normalize_pages: true,
             crop_mode: CropBoxMode::AlignVisible,
+            repair_bookmarks: true,
         }
     }
 }
@@ -1049,6 +1052,124 @@ fn try_repair_pdf_and_load(path: &Path) -> Result<Document, String> {
     result
 }
 
+/// Inspect only outline links, never follow arbitrary metadata or page references.
+#[derive(Debug, Default)]
+pub struct BookmarkInspection {
+    pub abnormal: bool,
+    pub may_have_bookmarks: bool,
+}
+
+pub fn inspect_bookmarks(doc: &Document) -> BookmarkInspection {
+    let mut result = BookmarkInspection::default();
+    let Ok(catalog) = doc.catalog() else {
+        return result;
+    };
+    let Ok(outlines) = catalog.get(b"Outlines") else {
+        return result;
+    };
+    let Ok(root_id) = outlines.as_reference() else {
+        return BookmarkInspection {
+            abnormal: true,
+            may_have_bookmarks: true,
+        };
+    };
+    let Ok(root) = doc.get_dictionary(root_id) else {
+        return BookmarkInspection {
+            abnormal: true,
+            may_have_bookmarks: true,
+        };
+    };
+    result.abnormal = root.get(b"Type").is_ok()
+        && root.get(b"Type").and_then(Object::as_name).ok() != Some(b"Outlines");
+    if root.get(b"Title").is_ok() {
+        result.abnormal = true;
+        result.may_have_bookmarks = true;
+    }
+    let mut pending = vec![(root_id, true)];
+    let mut seen = BTreeSet::new();
+    while let Some((id, is_root)) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Ok(node) = doc.get_dictionary(id) else {
+            result.abnormal = true;
+            // Recognized streams (e.g. XML metadata) cannot be bookmarks.
+            result.may_have_bookmarks |= !matches!(doc.get_object(id), Ok(Object::Stream(_)));
+            continue;
+        };
+        if !is_root {
+            if node.get(b"Title").and_then(Object::as_str).is_ok() {
+                result.may_have_bookmarks = true;
+            } else {
+                result.abnormal = true;
+                result.may_have_bookmarks = true;
+            }
+        }
+        let first = node.get(b"First").ok();
+        let last = node.get(b"Last").ok();
+        if first.is_some() != last.is_some() {
+            result.abnormal = true;
+        }
+        if first.is_none() && node.get(b"Count").and_then(Object::as_i64).unwrap_or(0) != 0 {
+            result.abnormal = true;
+            result.may_have_bookmarks = true;
+        }
+        if node.get(b"Prev").is_ok() && node.get(b"Prev").and_then(Object::as_reference).is_err() {
+            result.abnormal = true;
+        }
+        // Visit both endpoints to avoid silently deleting an orphaned last bookmark.
+        for link in [first, last].into_iter().flatten() {
+            if let Ok(child) = link.as_reference() {
+                if child == root_id || child == id {
+                    result.abnormal = true;
+                } else {
+                    pending.push((child, false));
+                }
+            } else {
+                result.abnormal = true;
+                result.may_have_bookmarks = true;
+            }
+        }
+        if let Some(first) = first {
+            let mut current = first.as_reference().ok();
+            let mut previous = None;
+            let mut siblings = BTreeSet::new();
+            while let Some(child) = current {
+                if child == root_id || !siblings.insert(child) {
+                    result.abnormal = true;
+                    break;
+                }
+                pending.push((child, false));
+                let Ok(item) = doc.get_dictionary(child) else {
+                    result.abnormal = true;
+                    break;
+                };
+                if item.get(b"Parent").and_then(Object::as_reference).ok() != Some(id)
+                    || item.get(b"Prev").and_then(Object::as_reference).ok() != previous
+                {
+                    result.abnormal = true;
+                }
+                previous = Some(child);
+                current = match item.get(b"Next") {
+                    Ok(next) => match next.as_reference() {
+                        Ok(next) => Some(next),
+                        Err(_) => {
+                            result.abnormal = true;
+                            result.may_have_bookmarks = true;
+                            None
+                        }
+                    },
+                    Err(_) => None,
+                };
+            }
+            if previous != last.and_then(|v| v.as_reference().ok()) {
+                result.abnormal = true;
+            }
+        }
+    }
+    result
+}
+
 /// 处理单个 PDF 文件
 #[allow(dead_code)]
 pub fn process_pdf(input_path: &str) -> ProcessResult {
@@ -1074,6 +1195,15 @@ pub fn process_pdf_with_options_and_progress(
     input_path: &str,
     options: ProcessOptions,
     on_progress: &mut dyn FnMut(ProcessingProgress),
+) -> ProcessResult {
+    process_pdf_with_bookmark_confirmation(input_path, options, on_progress, &mut || false)
+}
+
+pub fn process_pdf_with_bookmark_confirmation(
+    input_path: &str,
+    options: ProcessOptions,
+    on_progress: &mut dyn FnMut(ProcessingProgress),
+    confirm_repair: &mut dyn FnMut() -> bool,
 ) -> ProcessResult {
     let path = Path::new(input_path);
 
@@ -1109,6 +1239,7 @@ pub fn process_pdf_with_options_and_progress(
         skipped_images: 0,
         original_bytes: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
         output_bytes: 0,
+        bookmark_status: "未启用".to_string(),
         success: false,
         error: None,
     };
@@ -1133,6 +1264,26 @@ pub fn process_pdf_with_options_and_progress(
             }
         }
     };
+
+    let mut bookmarks_repaired = false;
+    if options.repair_bookmarks {
+        report("检查书签结构", 0, 0, 0, 0, 0.02);
+        let inspection = inspect_bookmarks(&doc);
+        result.bookmark_status = if !inspection.abnormal {
+            "结构正常".to_string()
+        } else if !inspection.may_have_bookmarks || confirm_repair() {
+            match doc.catalog_mut() {
+                Ok(catalog) => {
+                    catalog.remove(b"Outlines");
+                    bookmarks_repaired = true;
+                    "已清理异常书签结构".to_string()
+                }
+                Err(_) => "发现异常，无法清理书签入口".to_string(),
+            }
+        } else {
+            "发现异常，已按选择保留书签".to_string()
+        };
+    }
 
     // Phase 1: 从原始文档中读取页面信息
     let page_ids = doc.get_pages().into_values().collect::<Vec<ObjectId>>();
@@ -1210,7 +1361,8 @@ pub fn process_pdf_with_options_and_progress(
             .iter()
             .any(|&width| (width - target_width).abs() >= 0.01);
     let needs_page_geometry_change = needs_page_normalization || has_true_crop_work;
-    let needs_modification = needs_page_geometry_change || result.optimized_images > 0;
+    let needs_modification =
+        needs_page_geometry_change || result.optimized_images > 0 || bookmarks_repaired;
 
     if !needs_modification {
         result.output_path = "无需处理（所选操作不会改变此文件）".to_string();
@@ -1271,6 +1423,7 @@ pub fn process_pdf_with_options_and_progress(
 
             // A compression-only run must never leave the user with a larger file.
             if !needs_page_geometry_change
+                && !bookmarks_repaired
                 && result.original_bytes > 0
                 && result.output_bytes >= result.original_bytes
                 && std::fs::remove_file(&output_path).is_ok()
@@ -1316,6 +1469,124 @@ mod tests {
             }),
         );
         (doc, page_id)
+    }
+
+    fn outline_fixture(with_title: bool) -> (Document, ObjectId, ObjectId) {
+        let (mut doc, _) = cropped_page_document();
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => (1, 0) });
+        doc.trailer.set("Root", catalog);
+        let root = doc.add_object(dictionary! { "Type" => "Outlines", "Count" => 0 });
+        let child = if with_title {
+            doc.add_object(
+                dictionary! { "Title" => Object::string_literal("Chapter"), "Parent" => root },
+            )
+        } else {
+            doc.add_object(Stream::new(
+                dictionary! { "Type" => "Metadata", "Subtype" => "XML" },
+                vec![],
+            ))
+        };
+        doc.get_dictionary_mut(root).unwrap().set("First", child);
+        doc.get_dictionary_mut(root)
+            .unwrap()
+            .set("Last", if with_title { child } else { root });
+        doc.catalog_mut().unwrap().set("Outlines", root);
+        (doc, root, child)
+    }
+
+    #[test]
+    fn bookmark_detection_handles_empty_corrupt_valid_and_cycles() {
+        let (doc, _, _) = outline_fixture(false);
+        let inspection = inspect_bookmarks(&doc);
+        assert!(inspection.abnormal);
+        assert!(!inspection.may_have_bookmarks);
+        let (mut doc, root, child) = outline_fixture(true);
+        assert!(!inspect_bookmarks(&doc).abnormal);
+        doc.get_dictionary_mut(child).unwrap().set("Next", child);
+        assert!(inspect_bookmarks(&doc).abnormal);
+        assert!(inspect_bookmarks(&doc).may_have_bookmarks);
+        doc.get_dictionary_mut(child).unwrap().remove(b"Next");
+        doc.get_dictionary_mut(root).unwrap().set("Last", (999, 0));
+        assert!(inspect_bookmarks(&doc).may_have_bookmarks);
+        doc.catalog_mut().unwrap().remove(b"Outlines");
+        assert!(!inspect_bookmarks(&doc).abnormal);
+    }
+
+    #[test]
+    fn bookmark_repair_respects_switch_confirmation_and_writes_repair_only_output() {
+        let dir = std::env::temp_dir().join(format!(
+            "foliomend_bookmarks_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("book.pdf");
+        let options = ProcessOptions {
+            compress_images: false,
+            normalize_pages: false,
+            ..ProcessOptions::default()
+        };
+        let (mut doc, _, _) = outline_fixture(false);
+        doc.save(&path).unwrap();
+        let result = process_pdf_with_bookmark_confirmation(
+            path.to_str().unwrap(),
+            options,
+            &mut |_| {},
+            &mut || panic!("empty corrupt tree must repair automatically"),
+        );
+        assert!(result.success);
+        let repaired = Document::load(&result.output_path).unwrap();
+        assert!(repaired.catalog().unwrap().get(b"Outlines").is_err());
+        assert_eq!(repaired.get_pages().len(), 1);
+        assert!(Document::load(&path)
+            .unwrap()
+            .catalog()
+            .unwrap()
+            .get(b"Outlines")
+            .is_ok());
+        let disabled = ProcessOptions {
+            repair_bookmarks: false,
+            ..options
+        };
+        let result = process_pdf_with_bookmark_confirmation(
+            path.to_str().unwrap(),
+            disabled,
+            &mut |_| {},
+            &mut || panic!("disabled"),
+        );
+        assert_eq!(result.bookmark_status, "未启用");
+        assert!(result.output_path.starts_with("无需处理"));
+        let (mut doc, _, child) = outline_fixture(true);
+        doc.get_dictionary_mut(child).unwrap().set("Next", child);
+        doc.save(&path).unwrap();
+        let mut asked = false;
+        let result = process_pdf_with_bookmark_confirmation(
+            path.to_str().unwrap(),
+            options,
+            &mut |_| {},
+            &mut || {
+                asked = true;
+                false
+            },
+        );
+        assert!(asked);
+        assert!(result.output_path.starts_with("无需处理"));
+        let result = process_pdf_with_bookmark_confirmation(
+            path.to_str().unwrap(),
+            options,
+            &mut |_| {},
+            &mut || true,
+        );
+        assert!(result.success);
+        assert!(Document::load(&result.output_path)
+            .unwrap()
+            .catalog()
+            .unwrap()
+            .get(b"Outlines")
+            .is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
