@@ -24,6 +24,11 @@ try { optionRepairBookmarks.checked = localStorage.getItem("repairBookmarks") !=
 optionRepairBookmarks.addEventListener("change", () => {
     try { localStorage.setItem("repairBookmarks", String(optionRepairBookmarks.checked)); } catch (_) {}
 });
+const optionFitBookmarks = document.getElementById("option-fit-bookmarks");
+try { optionFitBookmarks.checked = localStorage.getItem("fitBookmarksToWidth") === "true"; } catch (_) {}
+optionFitBookmarks.addEventListener("change", () => {
+    try { localStorage.setItem("fitBookmarksToWidth", String(optionFitBookmarks.checked)); } catch (_) {}
+});
 const cropMode = document.getElementById("crop-mode");
 const cropModeHint = document.getElementById("crop-mode-hint");
 
@@ -33,6 +38,7 @@ function getProcessingOptions() {
         normalizePages: optionNormalizePages.checked,
         cropMode: cropMode.value,
         repairBookmarks: optionRepairBookmarks.checked,
+        fitBookmarksToWidth: optionFitBookmarks.checked,
     };
 }
 
@@ -158,6 +164,7 @@ btnProcess.addEventListener("click", async () => {
     optionNormalizePages.disabled = true;
     cropMode.disabled = true;
     optionRepairBookmarks.disabled = true;
+    optionFitBookmarks.disabled = true;
     progressSection.style.display = "block";
     resultsSection.style.display = "none";
     progressFill.style.width = "0%";
@@ -211,6 +218,7 @@ btnProcess.addEventListener("click", async () => {
         optionNormalizePages.disabled = false;
         cropMode.disabled = false;
         optionRepairBookmarks.disabled = false;
+        optionFitBookmarks.disabled = false;
     }
 });
 
@@ -249,6 +257,7 @@ function showResults(results) {
                         ${cropDetail}<br>
                         ${imageDetail}<br>
                         书签检测：${escapeHtml(r.bookmark_status || "未启用")}<br>
+                        ${options.fitBookmarksToWidth ? `书签适合宽度：已更新 ${r.bookmarks_fit_width || 0}，跳过 ${r.bookmarks_fit_width_skipped || 0}（外部链接或无法解析的目标）<br>` : ""}
                         ${sizeDetail}
                         输出文件: ${escapeHtml(r.output_path)}
                     </div>

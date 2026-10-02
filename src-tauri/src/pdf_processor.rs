@@ -22,6 +22,8 @@ pub struct ProcessResult {
     pub original_bytes: u64,
     pub output_bytes: u64,
     pub bookmark_status: String,
+    pub bookmarks_fit_width: usize,
+    pub bookmarks_fit_width_skipped: usize,
     pub success: bool,
     pub error: Option<String>,
 }
@@ -51,6 +53,7 @@ pub struct ProcessOptions {
     pub normalize_pages: bool,
     pub crop_mode: CropBoxMode,
     pub repair_bookmarks: bool,
+    pub fit_bookmarks_to_width: bool,
 }
 
 impl Default for ProcessOptions {
@@ -60,6 +63,7 @@ impl Default for ProcessOptions {
             normalize_pages: true,
             crop_mode: CropBoxMode::AlignVisible,
             repair_bookmarks: true,
+            fit_bookmarks_to_width: false,
         }
     }
 }
@@ -1170,6 +1174,174 @@ pub fn inspect_bookmarks(doc: &Document) -> BookmarkInspection {
     result
 }
 
+// Resolve named destinations without changing shared destinations used by links.
+fn bookmark_destination(doc: &Document, value: &Object) -> Option<Vec<Object>> {
+    let (_, value) = doc.dereference(value).ok()?;
+    match value {
+        Object::Array(array) => Some(array.clone()),
+        Object::Dictionary(dict) => {
+            let (_, value) = doc.dereference(dict.get(b"D").ok()?).ok()?;
+            value.as_array().ok().cloned()
+        }
+        Object::Name(name) | Object::String(name, _) => {
+            let catalog = doc.catalog().ok()?;
+            if let Ok(old) = catalog.get(b"Dests") {
+                if let Ok((_, Object::Dictionary(dict))) = doc.dereference(old) {
+                    if let Ok(value) = dict.get(name) {
+                        let (_, value) = doc.dereference(value).ok()?;
+                        return match value {
+                            Object::Array(a) => Some(a.clone()),
+                            Object::Dictionary(d) => doc
+                                .dereference(d.get(b"D").ok()?)
+                                .ok()?
+                                .1
+                                .as_array()
+                                .ok()
+                                .cloned(),
+                            _ => None,
+                        };
+                    }
+                }
+            }
+            let (_, names) = doc.dereference(catalog.get(b"Names").ok()?).ok()?;
+            let tree = names.as_dict().ok()?.get(b"Dests").ok()?;
+            let mut pending = vec![tree.clone()];
+            let mut seen = BTreeSet::new();
+            while let Some(node) = pending.pop() {
+                if let Object::Reference(id) = &node {
+                    if !seen.insert(*id) {
+                        continue;
+                    }
+                }
+                let (_, node) = doc.dereference(&node).ok()?;
+                let node = node.as_dict().ok()?;
+                if let Ok(entries) = node.get(b"Names").and_then(Object::as_array) {
+                    for pair in entries.chunks_exact(2) {
+                        if pair[0].as_str().ok() == Some(name.as_slice()) {
+                            let (_, target) = doc.dereference(&pair[1]).ok()?;
+                            return match target {
+                                Object::Array(a) => Some(a.clone()),
+                                Object::Dictionary(d) => doc
+                                    .dereference(d.get(b"D").ok()?)
+                                    .ok()?
+                                    .1
+                                    .as_array()
+                                    .ok()
+                                    .cloned(),
+                                _ => None,
+                            };
+                        }
+                    }
+                }
+                if let Ok(kids) = node.get(b"Kids").and_then(Object::as_array) {
+                    pending.extend(kids.iter().cloned());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn fit_bookmarks_to_width(doc: &mut Document) -> (usize, usize) {
+    let Some(root) = doc
+        .catalog()
+        .ok()
+        .and_then(|c| c.get(b"Outlines").ok())
+        .and_then(|o| o.as_reference().ok())
+    else {
+        return (0, 0);
+    };
+    let pages = doc.get_pages().into_values().collect::<BTreeSet<_>>();
+    let mut pending = vec![root];
+    let mut seen = BTreeSet::new();
+    let (mut updated, mut skipped) = (0, 0);
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Ok(node) = doc.get_dictionary(id).cloned() else {
+            continue;
+        };
+        for key in [b"First".as_slice(), b"Next", b"Last"] {
+            if let Ok(next) = node.get(key).and_then(Object::as_reference) {
+                pending.push(next);
+            }
+        }
+        if id == root || node.get(b"Title").is_err() {
+            continue;
+        }
+        let action = node
+            .get(b"A")
+            .ok()
+            .and_then(|a| doc.dereference(a).ok())
+            .and_then(|(_, a)| a.as_dict().ok())
+            .cloned();
+        let destination = if let Ok(dest) = node.get(b"Dest") {
+            Some((dest, false))
+        } else if let Some(a) = action.as_ref() {
+            if a.get(b"S").and_then(Object::as_name).ok() == Some(b"GoTo") {
+                a.get(b"D").ok().map(|d| (d, true))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some((dest, via_action)) = destination else {
+            skipped += 1;
+            continue;
+        };
+        let Some(array) = bookmark_destination(doc, dest) else {
+            skipped += 1;
+            continue;
+        };
+        let Some(page) = array
+            .first()
+            .and_then(|p| p.as_reference().ok())
+            .filter(|p| pages.contains(p))
+        else {
+            skipped += 1;
+            continue;
+        };
+        let kind = array.get(1).and_then(|v| v.as_name().ok());
+        let top = match kind {
+            Some(b"XYZ") => array.get(3).cloned(),
+            Some(b"FitH" | b"FitBH") => array.get(2).cloned(),
+            Some(b"FitR") => array.get(5).cloned(),
+            Some(b"Fit" | b"FitB" | b"FitV" | b"FitBV") => Some(Object::Null),
+            _ => None,
+        };
+        let Some(top) =
+            top.filter(|v| matches!(v, Object::Null | Object::Integer(_) | Object::Real(_)))
+        else {
+            skipped += 1;
+            continue;
+        };
+        if kind == Some(b"FitH")
+            && array.len() == 3
+            && !matches!(dest, Object::Name(_) | Object::String(_, _))
+        {
+            continue;
+        }
+        let fitted = Object::Array(vec![
+            Object::Reference(page),
+            Object::Name(b"FitH".to_vec()),
+            top,
+        ]);
+        if via_action {
+            // Copy the action onto the bookmark, so a shared action/link remains unchanged.
+            let mut a = action.unwrap();
+            a.set("D", fitted);
+            doc.get_dictionary_mut(id).unwrap().set("A", a);
+        } else {
+            doc.get_dictionary_mut(id).unwrap().set("Dest", fitted);
+        }
+        updated += 1;
+    }
+    (updated, skipped)
+}
+
 /// 处理单个 PDF 文件
 #[allow(dead_code)]
 pub fn process_pdf(input_path: &str) -> ProcessResult {
@@ -1240,6 +1412,8 @@ pub fn process_pdf_with_bookmark_confirmation(
         original_bytes: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
         output_bytes: 0,
         bookmark_status: "未启用".to_string(),
+        bookmarks_fit_width: 0,
+        bookmarks_fit_width_skipped: 0,
         success: false,
         error: None,
     };
@@ -1355,14 +1529,24 @@ pub fn process_pdf_with_bookmark_confirmation(
         report("已跳过图片压缩", 0, result.page_count, 0, 0, 0.80);
     }
 
+    if options.fit_bookmarks_to_width {
+        report("设置书签适合宽度", 0, result.page_count, 0, 0, 0.80);
+        (
+            result.bookmarks_fit_width,
+            result.bookmarks_fit_width_skipped,
+        ) = fit_bookmarks_to_width(&mut doc);
+    }
+
     // 检查是否有页面需要修改
     let needs_page_normalization = options.normalize_pages
         && widths
             .iter()
             .any(|&width| (width - target_width).abs() >= 0.01);
     let needs_page_geometry_change = needs_page_normalization || has_true_crop_work;
-    let needs_modification =
-        needs_page_geometry_change || result.optimized_images > 0 || bookmarks_repaired;
+    let needs_modification = needs_page_geometry_change
+        || result.optimized_images > 0
+        || bookmarks_repaired
+        || result.bookmarks_fit_width > 0;
 
     if !needs_modification {
         result.output_path = "无需处理（所选操作不会改变此文件）".to_string();
@@ -1424,6 +1608,7 @@ pub fn process_pdf_with_bookmark_confirmation(
             // A compression-only run must never leave the user with a larger file.
             if !needs_page_geometry_change
                 && !bookmarks_repaired
+                && result.bookmarks_fit_width == 0
                 && result.original_bytes > 0
                 && result.output_bytes >= result.original_bytes
                 && std::fs::remove_file(&output_path).is_ok()
@@ -1492,6 +1677,156 @@ mod tests {
             .set("Last", if with_title { child } else { root });
         doc.catalog_mut().unwrap().set("Outlines", root);
         (doc, root, child)
+    }
+
+    #[test]
+    fn fit_width_handles_named_destinations_shared_actions_and_nested_bookmarks() {
+        let (mut doc, root, first) = outline_fixture(true);
+        let page = *doc.get_pages().values().next().unwrap();
+        let xyz = Object::Array(vec![
+            page.into(),
+            Object::Name(b"XYZ".to_vec()),
+            20.into(),
+            650.into(),
+            Object::Real(1.5),
+        ]);
+        let shared_action = doc.add_object(dictionary! { "S" => "GoTo", "D" => xyz.clone() });
+        doc.get_dictionary_mut(first)
+            .unwrap()
+            .set("A", shared_action);
+        let child = doc.add_object(dictionary! { "Title" => Object::string_literal("Child"), "Parent" => first, "Dest" => Object::Name(b"chapter".to_vec()) });
+        doc.get_dictionary_mut(first).unwrap().set("First", child);
+        doc.get_dictionary_mut(first).unwrap().set("Last", child);
+        let names = doc.add_object(
+            dictionary! { "Names" => vec![Object::string_literal("chapter"), xyz.clone()] },
+        );
+        doc.catalog_mut()
+            .unwrap()
+            .set("Names", dictionary! { "Dests" => names });
+        let external = doc.add_object(dictionary! { "Title" => Object::string_literal("Web"), "Parent" => root, "Prev" => first, "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com") } });
+        doc.get_dictionary_mut(first).unwrap().set("Next", external);
+        doc.get_dictionary_mut(root).unwrap().set("Last", external);
+        assert_eq!(fit_bookmarks_to_width(&mut doc), (2, 1));
+        let a = doc
+            .get_dictionary(first)
+            .unwrap()
+            .get(b"A")
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        let dest = a.get(b"D").unwrap().as_array().unwrap();
+        assert_eq!(dest[1].as_name().unwrap(), b"FitH");
+        assert_eq!(dest[2].as_i64().unwrap(), 650);
+        assert_eq!(
+            doc.get_dictionary(shared_action)
+                .unwrap()
+                .get(b"D")
+                .unwrap()
+                .as_array()
+                .unwrap()[1]
+                .as_name()
+                .unwrap(),
+            b"XYZ"
+        );
+        assert_eq!(
+            doc.get_dictionary(child)
+                .unwrap()
+                .get(b"Dest")
+                .unwrap()
+                .as_array()
+                .unwrap()[1]
+                .as_name()
+                .unwrap(),
+            b"FitH"
+        );
+        assert_eq!(
+            doc.get_dictionary(first)
+                .unwrap()
+                .get(b"First")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+            child
+        );
+        assert_eq!(fit_bookmarks_to_width(&mut doc), (0, 1));
+    }
+
+    #[test]
+    fn fit_width_only_run_saves_output_and_switch_off_preserves_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "foliomend_fit_width_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("book.pdf");
+        let (mut doc, _, first) = outline_fixture(true);
+        let page = *doc.get_pages().values().next().unwrap();
+        doc.get_dictionary_mut(first).unwrap().set(
+            "Dest",
+            vec![
+                page.into(),
+                Object::Name(b"XYZ".to_vec()),
+                Object::Null,
+                500.into(),
+                Object::Null,
+            ],
+        );
+        doc.save(&input).unwrap();
+        let original = std::fs::read(&input).unwrap();
+        let options = ProcessOptions {
+            compress_images: false,
+            normalize_pages: false,
+            repair_bookmarks: false,
+            fit_bookmarks_to_width: false,
+            ..ProcessOptions::default()
+        };
+        let result =
+            process_pdf_with_options_and_progress(input.to_str().unwrap(), options, &mut |_| {});
+        assert!(result.success);
+        assert!(result.output_path.starts_with("无需处理"));
+        let result = process_pdf_with_options_and_progress(
+            input.to_str().unwrap(),
+            ProcessOptions {
+                fit_bookmarks_to_width: true,
+                ..options
+            },
+            &mut |_| {},
+        );
+        assert!(result.success);
+        assert_eq!(result.bookmarks_fit_width, 1);
+        let output = Document::load(&result.output_path).unwrap();
+        assert_eq!(output.get_pages().len(), 1);
+        let first = output
+            .catalog()
+            .unwrap()
+            .get(b"Outlines")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let first = output
+            .get_dictionary(first)
+            .unwrap()
+            .get(b"First")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        assert_eq!(
+            output
+                .get_dictionary(first)
+                .unwrap()
+                .get(b"Dest")
+                .unwrap()
+                .as_array()
+                .unwrap()[1]
+                .as_name()
+                .unwrap(),
+            b"FitH"
+        );
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

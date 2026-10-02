@@ -109,6 +109,8 @@ async fn process_pdfs(
                         original_bytes: 0,
                         output_bytes: 0,
                         bookmark_status: "未完成检测".to_string(),
+            bookmarks_fit_width: 0,
+            bookmarks_fit_width_skipped: 0,
                         success: false,
                         error: Some("处理该 PDF 时发生内部异常，已跳过此文件".to_string()),
                     },
@@ -152,6 +154,8 @@ async fn process_pdfs(
             original_bytes: 0,
             output_bytes: 0,
             bookmark_status: "未完成检测".to_string(),
+            bookmarks_fit_width: 0,
+            bookmarks_fit_width_skipped: 0,
             success: false,
             error: Some(format!("处理任务失败: {}", e)),
         }]
