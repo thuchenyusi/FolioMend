@@ -1,0 +1,14 @@
+{
+  "name": "foliomend",
+  "version": "0.1.0",
+  "description": "本地批量归一化、裁剪和压缩扫描 PDF 的桌面工具",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "keywords": [],
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.10.1"
+  }
+}

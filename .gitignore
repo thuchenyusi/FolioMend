@@ -1,0 +1,14 @@
+node_modules/
+src-tauri/target/
+dist/
+/tmp/
+/local-notes/
+
+*.exe
+*.msi
+*.dmg
+*.deb
+*.AppImage
+
+# 本地输入与生成的 PDF 文件
+*.[pP][dD][fF]

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FolioMend</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>FolioMend</h1>
+        <p class="description">统一页面宽度，并自动识别图像颜色：彩色保留、灰度减色、纯黑白转为 1-bit。</p>
+
+        <div class="file-section">
+            <div class="file-controls">
+                <button id="btn-select" class="btn btn-primary">选择 PDF 文件</button>
+                <span class="hint">支持选择多个文件，也可直接拖拽文件到窗口</span>
+            </div>
+
+            <div class="file-input-row">
+                <input type="text" id="manual-path" placeholder="或手动输入文件路径，按回车添加..." class="input-path">
+                <button id="btn-add-path" class="btn btn-small">添加</button>
+            </div>
+
+            <div id="file-list" class="file-list">
+                <p class="empty-hint">尚未选择任何文件</p>
+            </div>
+        </div>
+
+        <section class="options-section" aria-labelledby="options-title">
+            <h2 id="options-title">处理选项</h2>
+            <div class="option-switches">
+                <label class="check-option">
+                    <input id="option-compress-images" type="checkbox" checked>
+                    <span>
+                        <strong>图片压缩</strong>
+                        <small>自动识别彩色、灰度和纯黑白扫描图并安全减小体积</small>
+                    </span>
+                </label>
+                <label class="check-option">
+                    <input id="option-normalize-pages" type="checkbox" checked>
+                    <span>
+                        <strong>页面归一化</strong>
+                        <small>以实际可见区域为准，统一页面在阅读器中的显示宽度</small>
+                    </span>
+                </label>
+            </div>
+
+            <label class="select-option" for="crop-mode">
+                <span>CropBox 处理方式</span>
+                <select id="crop-mode">
+                    <option value="alignVisible">按裁剪后的可见宽度对齐</option>
+                    <option value="trueCrop">真正裁剪，使 MediaBox 与可见区域一致</option>
+                </select>
+            </label>
+            <p id="crop-mode-hint" class="option-hint">
+                保留原始 MediaBox，仅按 CropBox 的实际可见宽度等比归一化。
+            </p>
+        </section>
+
+        <div class="action-section">
+            <button id="btn-process" class="btn btn-success" disabled>开始处理</button>
+            <button id="btn-clear" class="btn btn-secondary">清空列表</button>
+        </div>
+
+        <div id="progress-section" class="progress-section" style="display: none;">
+            <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <p id="progress-text" class="progress-text">处理中...</p>
+        </div>
+
+        <div id="results-section" class="results-section" style="display: none;">
+            <h2>处理结果</h2>
+            <div id="results-list" class="results-list"></div>
+        </div>
+    </div>
+
+    <div id="drop-overlay" class="drop-overlay" style="display: none;">
+        <div class="drop-message">松开以添加 PDF 文件</div>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>

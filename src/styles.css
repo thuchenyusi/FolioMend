@@ -1,0 +1,383 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: #f5f6fa;
+    color: #2d3436;
+    min-height: 100vh;
+}
+
+.container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 40px 24px;
+}
+
+h1 {
+    font-size: 24px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #2d3436;
+}
+
+h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 12px;
+    color: #2d3436;
+}
+
+.description {
+    color: #636e72;
+    margin-bottom: 32px;
+    font-size: 14px;
+}
+
+.file-section {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    margin-bottom: 20px;
+}
+
+.options-section {
+    background: #fff;
+    border-radius: 12px;
+    padding: 22px 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    margin-bottom: 20px;
+}
+
+.option-switches {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 18px;
+}
+
+.check-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.check-option:has(input:checked) {
+    border-color: #74b9ff;
+    background: #f4faff;
+}
+
+.check-option input {
+    margin-top: 3px;
+    accent-color: #0984e3;
+}
+
+.check-option span,
+.check-option strong,
+.check-option small {
+    display: block;
+}
+
+.check-option strong {
+    font-size: 14px;
+    margin-bottom: 4px;
+}
+
+.check-option small,
+.option-hint {
+    color: #636e72;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.select-option {
+    display: grid;
+    grid-template-columns: 150px minmax(0, 1fr);
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.select-option select {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    background: #fff;
+    color: #2d3436;
+    font-size: 14px;
+    outline: none;
+}
+
+.select-option select:focus {
+    border-color: #0984e3;
+}
+
+.option-hint {
+    margin: 8px 0 0 162px;
+}
+
+@media (max-width: 620px) {
+    .option-switches {
+        grid-template-columns: 1fr;
+    }
+
+    .select-option {
+        grid-template-columns: 1fr;
+        gap: 6px;
+    }
+
+    .option-hint {
+        margin-left: 0;
+    }
+}
+
+.file-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.hint {
+    color: #b2bec3;
+    font-size: 13px;
+}
+
+.file-input-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.input-path {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.2s;
+}
+
+.input-path:focus {
+    border-color: #0984e3;
+}
+
+.file-list {
+    min-height: 60px;
+    max-height: 240px;
+    overflow-y: auto;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+.empty-hint {
+    color: #b2bec3;
+    text-align: center;
+    padding: 16px;
+    font-size: 14px;
+}
+
+.file-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    word-break: break-all;
+}
+
+.file-item:hover {
+    background: #f5f6fa;
+}
+
+.file-item .remove-btn {
+    cursor: pointer;
+    color: #d63031;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 4px;
+    flex-shrink: 0;
+    border: none;
+    background: none;
+}
+
+.file-item .remove-btn:hover {
+    color: #e17055;
+}
+
+/* 按钮样式 */
+.btn {
+    padding: 10px 20px;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-primary {
+    background: #0984e3;
+    color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background: #0870c4;
+}
+
+.btn-success {
+    background: #00b894;
+    color: #fff;
+}
+
+.btn-success:hover:not(:disabled) {
+    background: #00a381;
+}
+
+.btn-secondary {
+    background: #dfe6e9;
+    color: #636e72;
+}
+
+.btn-secondary:hover:not(:disabled) {
+    background: #b2bec3;
+    color: #2d3436;
+}
+
+.btn-small {
+    padding: 10px 16px;
+    background: #74b9ff;
+    color: #fff;
+    border-radius: 8px;
+}
+
+.btn-small:hover {
+    background: #0984e3;
+}
+
+.action-section {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+/* 进度条 */
+.progress-section {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    margin-bottom: 20px;
+}
+
+.progress-bar {
+    height: 8px;
+    background: #dfe6e9;
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 12px;
+}
+
+.progress-fill {
+    height: 100%;
+    background: #00b894;
+    border-radius: 4px;
+    transition: width 0.3s;
+    width: 0%;
+}
+
+.progress-text {
+    font-size: 13px;
+    color: #636e72;
+    text-align: center;
+}
+
+/* 结果 */
+.results-section {
+    background: #fff;
+    border-radius: 12px;
+    padding: 24px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.result-item {
+    padding: 16px;
+    border: 1px solid #dfe6e9;
+    border-radius: 8px;
+    margin-bottom: 12px;
+}
+
+.result-item:last-child {
+    margin-bottom: 0;
+}
+
+.result-item.success {
+    border-left: 4px solid #00b894;
+}
+
+.result-item.error {
+    border-left: 4px solid #d63031;
+}
+
+.result-filename {
+    font-weight: 600;
+    font-size: 14px;
+    margin-bottom: 4px;
+    word-break: break-all;
+}
+
+.result-detail {
+    font-size: 13px;
+    color: #636e72;
+    line-height: 1.6;
+}
+
+.result-error {
+    color: #d63031;
+    font-size: 13px;
+    margin-top: 4px;
+}
+
+/* 拖拽覆盖层 */
+.drop-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(9, 132, 227, 0.15);
+    border: 3px dashed #0984e3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    pointer-events: none;
+}
+
+.drop-message {
+    background: #fff;
+    padding: 24px 48px;
+    border-radius: 12px;
+    font-size: 18px;
+    font-weight: 600;
+    color: #0984e3;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+}
