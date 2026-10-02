@@ -14,6 +14,14 @@ FolioMend 是一款本地运行的扫描 PDF 整理工具，用于批量统一�
 
 FolioMend 不会上传 PDF；文件选择、解析和输出均在本机完成。
 
+## 下载与使用
+
+在本仓库的 GitHub Releases 页面下载 Windows x64 Portable ZIP，解压后运行 `FolioMend.exe`，无需安装 FolioMend。
+
+运行要求：Windows 10/11 x64，已安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。Portable 包不包含该运行时；WebView 缓存仍保存在系统用户目录。
+
+选择或拖入 PDF 后开始处理，输出文件保存在原文件目录，请确保目录可写。
+
 ## 开发环境
 
 - [Node.js](https://nodejs.org/)
@@ -39,8 +47,6 @@ npm run dev
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
-测试使用内存数据或系统临时目录中动态生成的 PDF，不依赖仓库外的本地文件。
-
 ## 构建安装包
 
 ```powershell
@@ -65,19 +71,3 @@ npm run build
 ## 项目状态
 
 FolioMend 目前处于早期开发阶段。处理重要文件前，建议保留原始 PDF 备份。
-
-## 持续集成（CI）
-
-GitHub Actions 配置位于 `.github/workflows/ci.yml`。PR 创建、更新或重新打开时，以及提交推送到 `main` 时（包括 PR 合并后），会自动运行基础测试，也支持在 Actions 页面手动运行。
-
-CI 使用 Windows runner，执行 `npm ci`、JavaScript 语法检查，以及所有 Rust 测试目标的编译与测试。Rust 使用 `--locked`；依赖缓存用于加快后续运行。每次 `main` 推送都会执行检查，PR 的新提交会取消该 PR 尚未完成的旧检查。
-
-本地执行相同的基础检查：
-
-```powershell
-npm ci
-npm run check
-cargo test --locked --all-targets --manifest-path src-tauri/Cargo.toml
-```
-
-运行结果可在仓库 Actions 页面查看。若需要在测试失败时禁止合并，可在 GitHub 的 `main` 分支保护规则中将 `Basic tests (Windows)` 设为必需状态检查。基础 CI 不包含桌面界面自动化或安装包构建。
