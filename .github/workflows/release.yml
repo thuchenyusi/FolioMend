@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  portable:
+    name: Windows x64 Portable
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$') {
+            throw 'Expected a version tag such as v0.1.0 or v0.1.0-beta.1'
+          }
+          $version = $env:RELEASE_TAG.Substring(1)
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          $tauri = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $metadata = cargo metadata --no-deps --format-version 1 --manifest-path src-tauri/Cargo.toml | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to read Cargo metadata' }
+          $rust = $metadata.packages | Where-Object name -eq 'foliomend'
+          foreach ($actual in @($package.version, $lock.version, $lock.packages[''].version, $tauri.version, $rust.version)) {
+            if ($actual -ne $version) { throw "Version mismatch: tag=$version, project=$actual" }
+          }
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: npm run check
+
+      - name: Run Rust tests
+        run: cargo test --locked --all-targets --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Portable executable
+        run: npm run tauri -- build --ci --no-bundle --target x86_64-pc-windows-msvc -- --locked
+
+      - name: Package Portable release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $name = "FolioMend-$env:RELEASE_TAG-windows-x64-portable"
+          $stage = New-Item -ItemType Directory -Path "dist/$name" -Force
+          Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/foliomend.exe "$stage/FolioMend.exe"
+          Copy-Item README.md "$stage/README.md"
+          @'
+          FolioMend Windows x64 Portable
+
+          解压后运行 FolioMend.exe，无需安装 FolioMend。
+          需要 Windows 10/11 x64 和 Microsoft Edge WebView2 Runtime。
+          WebView2 下载：https://developer.microsoft.com/microsoft-edge/webview2/
+          此包不包含 WebView2 Runtime，应用的 WebView 缓存使用系统用户目录。
+          输出 PDF 保存在原文件目录，请确保该目录可写。
+          '@ | Set-Content "$stage/使用说明.txt" -Encoding utf8
+          $zip = "dist/$name.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+          @'
+          Windows x64 免安装版：下载 Portable ZIP，解压后运行 FolioMend.exe。
+
+          需要 Windows 10/11 x64 和 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)。此包不包含 WebView2 Runtime。
+
+          SHA256SUMS.txt 提供 ZIP 的 SHA-256 校验值。
+          '@ | Set-Content dist/release-notes.md -Encoding utf8
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $zip = Get-ChildItem dist -Filter '*.zip' | Select-Object -ExpandProperty FullName
+          $releaseArgs = @('release', 'create', $env:RELEASE_TAG, $zip, 'dist/SHA256SUMS.txt', '--verify-tag', '--title', "FolioMend $env:RELEASE_TAG", '--notes-file', 'dist/release-notes.md', '--generate-notes')
+          if ($env:RELEASE_TAG.Contains('-')) { $releaseArgs += '--prerelease' }
+          gh @releaseArgs
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed' }
