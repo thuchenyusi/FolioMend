@@ -1,15 +1,22 @@
 {
   "name": "foliomend",
   "version": "0.1.0",
+  "type": "module",
   "description": "本地批量归一化、裁剪和压缩扫描 PDF 的桌面工具",
   "scripts": {
     "check": "node --check src/main.js",
+    "frontend:dev": "vite",
+    "frontend:build": "vite build",
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build"
   },
   "keywords": [],
   "devDependencies": {
-    "@tauri-apps/cli": "^2.10.1"
+    "@tauri-apps/cli": "^2.10.1",
+    "vite": "^7.3.6"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "~2.10.1"
   }
 }

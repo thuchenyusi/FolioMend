@@ -61,6 +61,9 @@ jobs:
       - name: Check JavaScript syntax
         run: npm run check
 
+      - name: Build frontend
+        run: npm run frontend:build
+
       - name: Run Rust tests
         run: cargo test --locked --all-targets --manifest-path src-tauri/Cargo.toml
 

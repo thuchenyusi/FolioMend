@@ -78,23 +78,23 @@
             <button id="btn-clear" class="btn btn-secondary">清空列表</button>
         </div>
 
-        <div id="progress-section" class="progress-section" style="display: none;">
+        <div id="progress-section" class="progress-section initially-hidden">
             <div class="progress-bar">
                 <div id="progress-fill" class="progress-fill"></div>
             </div>
             <p id="progress-text" class="progress-text">处理中...</p>
         </div>
 
-        <div id="results-section" class="results-section" style="display: none;">
+        <div id="results-section" class="results-section initially-hidden">
             <h2>处理结果</h2>
             <div id="results-list" class="results-list"></div>
         </div>
     </div>
 
-    <div id="drop-overlay" class="drop-overlay" style="display: none;">
+    <div id="drop-overlay" class="drop-overlay initially-hidden">
         <div class="drop-message">松开以添加 PDF 文件</div>
     </div>
 
-    <script src="main.js"></script>
+    <script type="module" src="main.js"></script>
 </body>
 </html>

@@ -20,20 +20,24 @@ struct BatchProgress {
 
 #[tauri::command]
 async fn select_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
-    let files = app
-        .dialog()
+    let (sender, mut receiver) = tauri::async_runtime::channel(1);
+    app.dialog()
         .file()
         .add_filter("PDF 文件", &["pdf"])
         .set_title("选择 PDF 文件")
-        .blocking_pick_files();
+        .pick_files(move |files| {
+            let paths = files
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|p| p.as_path().map(|path| path.to_string_lossy().to_string()))
+                .collect::<Vec<String>>();
+            let _ = sender.try_send(paths);
+        });
 
-    match files {
-        Some(paths) => Ok(paths
-            .iter()
-            .filter_map(|p| p.as_path().map(|path| path.to_string_lossy().to_string()))
-            .collect()),
-        None => Ok(vec![]),
-    }
+    receiver
+        .recv()
+        .await
+        .ok_or_else(|| "文件选择对话框未返回结果".to_string())
 }
 
 #[tauri::command]

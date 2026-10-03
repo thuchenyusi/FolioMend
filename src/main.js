@@ -1,6 +1,6 @@
-const { invoke } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
-const { getCurrentWebviewWindow } = window.__TAURI__.webviewWindow;
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 let selectedFiles = [];
 let stopProgressListener = null;

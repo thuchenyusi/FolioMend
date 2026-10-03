@@ -24,7 +24,7 @@ FolioMend 不会上传 PDF；文件选择、解析和输出均在本机完成。
 
 ## 开发环境
 
-- [Node.js](https://nodejs.org/)
+- [Node.js](https://nodejs.org/) 22.12 或更高版本
 - [Rust](https://www.rust-lang.org/tools/install)
 - [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)
 
@@ -44,8 +44,12 @@ npm run dev
 ## 测试
 
 ```powershell
+npm run check
+npm run frontend:build
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+前端使用 ES Module 和 Vite 构建，Tauri 开发及发布命令会自动启动或构建前端。直接运行 Rust 测试前需先生成 `dist/`。
 
 ## 构建安装包
 
