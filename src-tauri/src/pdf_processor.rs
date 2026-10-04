@@ -989,6 +989,12 @@ pub fn inspect_bookmarks(doc: &Document) -> BookmarkInspection {
         result.abnormal = true;
         result.may_have_bookmarks = true;
     }
+    if [b"Parent".as_slice(), b"Prev", b"Next"]
+        .iter()
+        .any(|key| root.get(key).is_ok())
+    {
+        result.abnormal = true;
+    }
     let mut pending = vec![(root_id, true)];
     let mut seen = BTreeSet::new();
     while let Some((id, is_root)) = pending.pop() {
@@ -1070,6 +1076,9 @@ pub fn inspect_bookmarks(doc: &Document) -> BookmarkInspection {
                 result.abnormal = true;
             }
         }
+    }
+    if !result.abnormal && !crate::bookmark_repair::counts_are_valid(doc, root_id) {
+        result.abnormal = true;
     }
     result
 }
@@ -1368,17 +1377,32 @@ pub fn process_pdf_with_bookmark_confirmation(
         let inspection = inspect_bookmarks(&doc);
         result.bookmark_status = if !inspection.abnormal {
             "结构正常".to_string()
-        } else if !inspection.may_have_bookmarks || confirm_repair() {
-            match doc.catalog_mut() {
-                Ok(catalog) => {
-                    catalog.remove(b"Outlines");
-                    bookmarks_repaired = true;
-                    "已清理异常书签结构".to_string()
-                }
-                Err(_) => "发现异常，无法清理书签入口".to_string(),
-            }
         } else {
-            "发现异常，已按选择保留书签".to_string()
+            report("尝试修复书签结构", 0, 0, 0, 0, 0.025);
+            match crate::bookmark_repair::repair_structure(&mut doc) {
+                Ok(preserved) => {
+                    bookmarks_repaired = true;
+                    format!("已修复异常书签结构，保留 {preserved} 条书签")
+                }
+                Err(reason) => {
+                    if !inspection.may_have_bookmarks || confirm_repair() {
+                        match doc.catalog_mut() {
+                            Ok(catalog) => {
+                                catalog.remove(b"Outlines");
+                                bookmarks_repaired = true;
+                                if inspection.may_have_bookmarks {
+                                    format!("自动修复失败（{reason}），已按选择清理全部书签")
+                                } else {
+                                    "无法修复，已清理异常空书签结构".to_string()
+                                }
+                            }
+                            Err(_) => "自动修复失败，无法清理书签入口".to_string(),
+                        }
+                    } else {
+                        format!("自动修复失败（{reason}），已按选择保留原有书签")
+                    }
+                }
+            }
         };
     }
 
@@ -1648,7 +1672,9 @@ mod tests {
         let (mut doc, _) = cropped_page_document();
         let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => (1, 0) });
         doc.trailer.set("Root", catalog);
-        let root = doc.add_object(dictionary! { "Type" => "Outlines", "Count" => 0 });
+        let root = doc.add_object(
+            dictionary! { "Type" => "Outlines", "Count" => if with_title { 1 } else { 0 } },
+        );
         let child = if with_title {
             doc.add_object(
                 dictionary! { "Title" => Object::string_literal("Chapter"), "Parent" => root },
@@ -1836,6 +1862,213 @@ mod tests {
     }
 
     #[test]
+    fn bookmark_structure_repair_preserves_nested_titles_destinations_style_and_closed_state() {
+        let (mut doc, root, first) = outline_fixture(true);
+        let page = *doc.get_pages().values().next().unwrap();
+        let child = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Section"), "Parent" => root,
+            "Dest" => vec![page.into(), Object::Name(b"XYZ".to_vec()), 20.into(), 650.into(), Object::Real(1.5)],
+            "Count" => 99,
+        });
+        let grandchild = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Detail"), "Parent" => root,
+            "A" => dictionary! { "S" => "URI", "URI" => Object::string_literal("https://example.com") }
+        });
+        let last = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Last chapter"), "Parent" => child, "Prev" => first,
+            "Dest" => Object::Name(b"named-target".to_vec())
+        });
+        doc.get_dictionary_mut(first).unwrap().set("Next", first);
+        doc.get_dictionary_mut(first).unwrap().set("First", child);
+        doc.get_dictionary_mut(first).unwrap().set("Count", -99);
+        doc.get_dictionary_mut(first).unwrap().set("F", 3);
+        doc.get_dictionary_mut(first)
+            .unwrap()
+            .set("C", vec![1.into(), 0.into(), 0.into()]);
+        doc.get_dictionary_mut(child)
+            .unwrap()
+            .set("First", grandchild);
+        doc.get_dictionary_mut(child)
+            .unwrap()
+            .set("Last", grandchild);
+        doc.get_dictionary_mut(root).unwrap().set("Last", last);
+        let ids = [first, child, grandchild, last];
+        let content_before = ids
+            .iter()
+            .map(|id| {
+                let item = doc.get_dictionary(*id).unwrap();
+                [b"Title".as_slice(), b"Dest", b"A", b"F", b"C"]
+                    .iter()
+                    .map(|key| format!("{:?}", item.get(key)))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert!(inspect_bookmarks(&doc).abnormal);
+        assert_eq!(
+            crate::bookmark_repair::repair_structure(&mut doc).unwrap(),
+            4
+        );
+        assert!(!inspect_bookmarks(&doc).abnormal);
+        for (id, before) in ids.iter().zip(content_before) {
+            let item = doc.get_dictionary(*id).unwrap();
+            let after = [b"Title".as_slice(), b"Dest", b"A", b"F", b"C"]
+                .iter()
+                .map(|key| format!("{:?}", item.get(key)))
+                .collect::<Vec<_>>();
+            assert_eq!(before, after);
+        }
+        assert_eq!(
+            doc.get_dictionary(first)
+                .unwrap()
+                .get(b"Next")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+            last
+        );
+        assert_eq!(
+            doc.get_dictionary(child)
+                .unwrap()
+                .get(b"Parent")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+            first
+        );
+        assert_eq!(
+            doc.get_dictionary(grandchild)
+                .unwrap()
+                .get(b"Parent")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+            child
+        );
+        assert_eq!(
+            doc.get_dictionary(root)
+                .unwrap()
+                .get(b"Count")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            doc.get_dictionary(first)
+                .unwrap()
+                .get(b"Count")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            -2
+        );
+        assert_eq!(
+            doc.get_dictionary(child)
+                .unwrap()
+                .get(b"Count")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn bookmark_repair_recovers_backward_chain_inline_root_and_stale_endpoints() {
+        let (mut doc, root, first) = outline_fixture(true);
+        let last = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Last"), "Parent" => root, "Prev" => first,
+        });
+        doc.get_dictionary_mut(root).unwrap().remove(b"First");
+        doc.get_dictionary_mut(root).unwrap().set("Last", last);
+        let inline = doc.get_dictionary(root).unwrap().clone();
+        doc.catalog_mut().unwrap().set("Outlines", inline);
+        assert_eq!(
+            crate::bookmark_repair::repair_structure(&mut doc).unwrap(),
+            2
+        );
+        assert!(!inspect_bookmarks(&doc).abnormal);
+        let restored_root = doc
+            .catalog()
+            .unwrap()
+            .get(b"Outlines")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        assert_ne!(root, restored_root);
+        assert_eq!(
+            doc.get_dictionary(restored_root)
+                .unwrap()
+                .get(b"First")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+            first
+        );
+        doc.get_dictionary_mut(restored_root)
+            .unwrap()
+            .set("Last", (999, 0));
+        assert_eq!(
+            crate::bookmark_repair::repair_structure(&mut doc).unwrap(),
+            2
+        );
+        assert_eq!(
+            doc.get_dictionary(restored_root)
+                .unwrap()
+                .get(b"Last")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+            last
+        );
+    }
+
+    #[test]
+    fn bookmark_repair_failure_does_not_apply_partial_changes_or_drop_ambiguous_items() {
+        let (mut doc, root, first) = outline_fixture(true);
+        let child = doc.add_object(dictionary! {
+            "Title" => 123, "Parent" => root,
+        });
+        doc.get_dictionary_mut(first)
+            .unwrap()
+            .set("Parent", (999, 0));
+        doc.get_dictionary_mut(first).unwrap().set("First", child);
+        doc.get_dictionary_mut(first).unwrap().set("Last", child);
+        let before = format!("{:?}", doc.objects);
+        assert!(crate::bookmark_repair::repair_structure(&mut doc).is_err());
+        assert_eq!(format!("{:?}", doc.objects), before);
+
+        // A title reachable only from an inconsistent Prev cannot be dropped.
+        let (mut doc, root, first) = outline_fixture(true);
+        let orphan = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Do not lose this title"), "Parent" => root,
+        });
+        let last = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Last"), "Parent" => root, "Prev" => first,
+        });
+        doc.get_dictionary_mut(first).unwrap().set("Next", last);
+        doc.get_dictionary_mut(first).unwrap().set("Prev", orphan);
+        doc.get_dictionary_mut(root).unwrap().set("Last", last);
+        let before = format!("{:?}", doc.objects);
+        // This reverse chain recovers the extra title and keeps it in the tree.
+        assert_eq!(
+            crate::bookmark_repair::repair_structure(&mut doc).unwrap(),
+            3
+        );
+        assert!(doc.get_dictionary(orphan).unwrap().get(b"Title").is_ok());
+        assert!(!inspect_bookmarks(&doc).abnormal);
+        assert_ne!(format!("{:?}", doc.objects), before);
+
+        let unplaced = doc.add_object(dictionary! {
+            "Title" => Object::string_literal("Unplaced root sibling"), "Parent" => root,
+        });
+        doc.get_dictionary_mut(root).unwrap().set("Next", unplaced);
+        let before = format!("{:?}", doc.objects);
+        assert!(crate::bookmark_repair::repair_structure(&mut doc).is_err());
+        assert_eq!(format!("{:?}", doc.objects), before);
+    }
+
+    #[test]
     fn bookmark_repair_respects_switch_confirmation_and_writes_repair_only_output() {
         let dir = std::env::temp_dir().join(format!(
             "foliomend_bookmarks_{}",
@@ -1884,6 +2117,24 @@ mod tests {
         let (mut doc, _, child) = outline_fixture(true);
         doc.get_dictionary_mut(child).unwrap().set("Next", child);
         doc.save(&path).unwrap();
+        let restored = process_pdf_with_bookmark_confirmation(
+            path.to_str().unwrap(),
+            options,
+            &mut |_| {},
+            &mut || panic!("recoverable structure must not ask to delete"),
+        );
+        assert!(restored.success);
+        assert!(restored.bookmark_status.contains("保留 1 条书签"));
+        let recovered = Document::load(&restored.output_path).unwrap();
+        assert!(!inspect_bookmarks(&recovered).abnormal);
+        assert!(recovered
+            .get_dictionary(child)
+            .unwrap()
+            .get(b"Title")
+            .is_ok());
+        doc.get_dictionary_mut(child).unwrap().set("Title", 123);
+        doc.save(&path).unwrap();
+        let before_failure = std::fs::read(&path).unwrap();
         let mut asked = false;
         let result = process_pdf_with_bookmark_confirmation(
             path.to_str().unwrap(),
@@ -1895,7 +2146,9 @@ mod tests {
             },
         );
         assert!(asked);
+        assert!(result.bookmark_status.contains("保留原有书签"));
         assert!(result.output_path.starts_with("无需处理"));
+        assert_eq!(std::fs::read(&path).unwrap(), before_failure);
         let result = process_pdf_with_bookmark_confirmation(
             path.to_str().unwrap(),
             options,

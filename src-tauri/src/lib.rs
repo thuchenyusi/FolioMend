@@ -1,3 +1,4 @@
+mod bookmark_repair;
 mod pdf_processor;
 mod pdf_repair;
 
@@ -93,8 +94,8 @@ async fn process_pdfs(
                         options,
                         &mut report_progress,
                         &mut || app.dialog()
-                            .message(format!("{}\n\n检测到异常书签结构，且含有书签或无法确认书签内容。清理会移除所有现有书签，但保留页面内容，只写入输出副本。是否清理？取消将保留书签并继续其他处理。", path))
-                            .title("修复异常书签")
+                            .message(format!("{}\n\n书签自动修复未能可靠恢复原有结构。是否清理全部书签？清理会移除所有现有书签，但保留页面内容，只写入输出副本。取消将保留原有书签并继续其他处理。", path))
+                            .title("书签修复失败")
                             .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom("清理书签".into(), "保留书签".into()))
                             .blocking_show(),
                     )
