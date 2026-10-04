@@ -19,6 +19,11 @@ const resultsSection = document.getElementById("results-section");
 const resultsList = document.getElementById("results-list");
 const optionCompressImages = document.getElementById("option-compress-images");
 const optionNormalizePages = document.getElementById("option-normalize-pages");
+const optionRepairPdf = document.getElementById("option-repair-pdf");
+try { optionRepairPdf.checked = localStorage.getItem("repairPdf") !== "false"; } catch (_) {}
+optionRepairPdf.addEventListener("change", () => {
+    try { localStorage.setItem("repairPdf", String(optionRepairPdf.checked)); } catch (_) {}
+});
 const optionRepairBookmarks = document.getElementById("option-repair-bookmarks");
 try { optionRepairBookmarks.checked = localStorage.getItem("repairBookmarks") !== "false"; } catch (_) {}
 optionRepairBookmarks.addEventListener("change", () => {
@@ -37,6 +42,7 @@ function getProcessingOptions() {
         compressImages: optionCompressImages.checked,
         normalizePages: optionNormalizePages.checked,
         cropMode: cropMode.value,
+        repairPdf: optionRepairPdf.checked,
         repairBookmarks: optionRepairBookmarks.checked,
         fitBookmarksToWidth: optionFitBookmarks.checked,
     };
@@ -163,6 +169,7 @@ btnProcess.addEventListener("click", async () => {
     optionCompressImages.disabled = true;
     optionNormalizePages.disabled = true;
     cropMode.disabled = true;
+    optionRepairPdf.disabled = true;
     optionRepairBookmarks.disabled = true;
     optionFitBookmarks.disabled = true;
     progressSection.style.display = "block";
@@ -217,6 +224,7 @@ btnProcess.addEventListener("click", async () => {
         optionCompressImages.disabled = false;
         optionNormalizePages.disabled = false;
         cropMode.disabled = false;
+        optionRepairPdf.disabled = false;
         optionRepairBookmarks.disabled = false;
         optionFitBookmarks.disabled = false;
     }
@@ -256,6 +264,7 @@ function showResults(results) {
                         ${normalizationDetail}<br>
                         ${cropDetail}<br>
                         ${imageDetail}<br>
+                        PDF 自动修复：${escapeHtml(r.pdf_repair_status || "未启用")}<br>
                         书签检测：${escapeHtml(r.bookmark_status || "未启用")}<br>
                         ${options.fitBookmarksToWidth ? `书签适合宽度：已更新 ${r.bookmarks_fit_width || 0}，跳过 ${r.bookmarks_fit_width_skipped || 0}（外部链接或无法解析的目标）<br>` : ""}
                         ${sizeDetail}

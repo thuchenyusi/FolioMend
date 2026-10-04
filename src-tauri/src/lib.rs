@@ -1,4 +1,5 @@
 mod pdf_processor;
+mod pdf_repair;
 
 use pdf_processor::{ProcessOptions, ProcessResult, ProcessingProgress};
 use serde::Serialize;
@@ -112,9 +113,10 @@ async fn process_pdfs(
                         skipped_images: 0,
                         original_bytes: 0,
                         output_bytes: 0,
+                        pdf_repair_status: "未完成检测".to_string(),
                         bookmark_status: "未完成检测".to_string(),
-            bookmarks_fit_width: 0,
-            bookmarks_fit_width_skipped: 0,
+                        bookmarks_fit_width: 0,
+                        bookmarks_fit_width_skipped: 0,
                         success: false,
                         error: Some("处理该 PDF 时发生内部异常，已跳过此文件".to_string()),
                     },
@@ -157,6 +159,7 @@ async fn process_pdfs(
             skipped_images: 0,
             original_bytes: 0,
             output_bytes: 0,
+            pdf_repair_status: "未完成检测".to_string(),
             bookmark_status: "未完成检测".to_string(),
             bookmarks_fit_width: 0,
             bookmarks_fit_width_skipped: 0,

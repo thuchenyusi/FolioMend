@@ -21,6 +21,7 @@ pub struct ProcessResult {
     pub skipped_images: usize,
     pub original_bytes: u64,
     pub output_bytes: u64,
+    pub pdf_repair_status: String,
     pub bookmark_status: String,
     pub bookmarks_fit_width: usize,
     pub bookmarks_fit_width_skipped: usize,
@@ -52,6 +53,7 @@ pub struct ProcessOptions {
     pub compress_images: bool,
     pub normalize_pages: bool,
     pub crop_mode: CropBoxMode,
+    pub repair_pdf: bool,
     pub repair_bookmarks: bool,
     pub fit_bookmarks_to_width: bool,
 }
@@ -62,6 +64,7 @@ impl Default for ProcessOptions {
             compress_images: true,
             normalize_pages: true,
             crop_mode: CropBoxMode::AlignVisible,
+            repair_pdf: true,
             repair_bookmarks: true,
             fit_bookmarks_to_width: false,
         }
@@ -953,109 +956,6 @@ fn generate_output_path(input_path: &Path) -> PathBuf {
     unreachable!()
 }
 
-/// 在 PDF 数据中查找 xref 表的实际字节偏移量
-/// 修复非标准 startxref 格式：
-/// 有些 PDF 生成器将偏移值写在 startxref 同一行（如 "startxref 12345\r%%EOF"），
-/// 而 lopdf 要求其各占一行（"startxref\n12345\n%%EOF"）。
-fn repair_pdf_startxref(data: &[u8]) -> Option<Vec<u8>> {
-    // 只在末尾 2KB 内查找，避免全文扫描
-    let window_size = 2048.min(data.len());
-    let window_start = data.len() - window_size;
-    let window = &data[window_start..];
-
-    // 找最后一个 "startxref"
-    let sxref_rel = window
-        .windows(9)
-        .enumerate()
-        .rev()
-        .find(|(_, w)| *w == b"startxref")
-        .map(|(i, _)| i)?;
-    let sxref_abs = window_start + sxref_rel;
-
-    let after = sxref_abs + 9;
-    if after >= data.len() {
-        return None;
-    }
-
-    // 判断 "startxref" 后紧跟的是空格还是换行符
-    // 若已经是换行符，则格式正常，无需修复
-    let next_byte = data[after];
-    if next_byte == b'\r' || next_byte == b'\n' {
-        return None;
-    }
-    // 若不是空格/制表符，无法识别，放弃
-    if next_byte != b' ' && next_byte != b'\t' {
-        return None;
-    }
-
-    // 跳过空白，定位数字开始
-    let mut num_start = after;
-    while num_start < data.len() && matches!(data[num_start], b' ' | b'\t') {
-        num_start += 1;
-    }
-
-    // 读取数字
-    let mut num_end = num_start;
-    while num_end < data.len() && data[num_end].is_ascii_digit() {
-        num_end += 1;
-    }
-    if num_start == num_end {
-        return None;
-    }
-
-    // 验证该数字是一个有效偏移（指向文件内部）
-    let offset_str = std::str::from_utf8(&data[num_start..num_end]).ok()?;
-    let offset: usize = offset_str.parse().ok()?;
-    if offset == 0 || offset >= data.len() {
-        return None;
-    }
-
-    // 跳过数字后的行尾（可能有尾随空格，再跟 \r 或 \n 或 \r\n）
-    let mut rest_start = num_end;
-    while rest_start < data.len() && matches!(data[rest_start], b' ' | b'\t') {
-        rest_start += 1;
-    }
-    if rest_start < data.len() && data[rest_start] == b'\r' {
-        rest_start += 1;
-        if rest_start < data.len() && data[rest_start] == b'\n' {
-            rest_start += 1;
-        }
-    } else if rest_start < data.len() && data[rest_start] == b'\n' {
-        rest_start += 1;
-    }
-
-    // 重建：将 "startxref <spaces><number><eol>" 替换为标准的三行格式
-    let mut result = Vec::with_capacity(data.len() + 8);
-    result.extend_from_slice(&data[..sxref_abs]);
-    result.extend_from_slice(b"startxref\r\n");
-    result.extend_from_slice(&data[num_start..num_end]);
-    result.extend_from_slice(b"\r\n");
-    result.extend_from_slice(&data[rest_start..]);
-    Some(result)
-}
-
-/// 修复 PDF 后写入临时文件并重新加载
-fn try_repair_pdf_and_load(path: &Path) -> Result<Document, String> {
-    let data = std::fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
-
-    let repaired = repair_pdf_startxref(&data)
-        .ok_or_else(|| "无法自动修复 PDF startxref 格式（未找到可修复的格式）".to_string())?;
-
-    let tmp_path = std::env::temp_dir().join(format!(
-        "foliomend_repair_{}.pdf",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
-
-    std::fs::write(&tmp_path, &repaired).map_err(|e| format!("写入临时文件失败: {}", e))?;
-
-    let result = Document::load(&tmp_path).map_err(|e| format!("修复后仍无法加载: {}", e));
-    let _ = std::fs::remove_file(&tmp_path);
-    result
-}
-
 /// Inspect only outline links, never follow arbitrary metadata or page references.
 #[derive(Debug, Default)]
 pub struct BookmarkInspection {
@@ -1411,6 +1311,12 @@ pub fn process_pdf_with_bookmark_confirmation(
         skipped_images: 0,
         original_bytes: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
         output_bytes: 0,
+        pdf_repair_status: if options.repair_pdf {
+            "无需修复"
+        } else {
+            "未启用"
+        }
+        .to_string(),
         bookmark_status: "未启用".to_string(),
         bookmarks_fit_width: 0,
         bookmarks_fit_width_skipped: 0,
@@ -1419,23 +1325,40 @@ pub fn process_pdf_with_bookmark_confirmation(
     };
 
     // 完整加载并重写文档，避免增量保存把旧图像字节继续保留在输出中。
-    let mut doc = match Document::load(path) {
+    let mut pdf_repaired = false;
+    let loaded = Document::load(path).and_then(|doc| {
+        // lopdf may return a partial document when object offsets are wrong.
+        doc.catalog()?;
+        if doc.get_pages().is_empty() {
+            return Err(lopdf::Error::PageNumberNotFound(1));
+        }
+        Ok(doc)
+    });
+    let mut doc = match loaded {
         Ok(doc) => doc,
-        Err(e) => {
-            let err_str = e.to_string();
-            // 若为 xref 无效错误，尝试自动修复后重新加载
-            if err_str.contains("invalid start value") || err_str.contains("cross-reference") {
-                match try_repair_pdf_and_load(path) {
-                    Ok(doc) => doc,
-                    Err(_) => {
-                        result.error = Some(format!("无法加载 PDF 文件: {}", e));
-                        return result;
-                    }
+        Err(original_error) if options.repair_pdf => {
+            report("修复 PDF 索引", 0, 0, 0, 0, 0.015);
+            let repair = std::fs::read(path)
+                .map_err(|e| format!("读取文件失败: {e}"))
+                .and_then(|data| crate::pdf_repair::repair_and_load(&data));
+            match repair {
+                Ok(doc) => {
+                    pdf_repaired = true;
+                    result.pdf_repair_status = "已修复 PDF 索引".to_string();
+                    doc
                 }
-            } else {
-                result.error = Some(format!("无法加载 PDF 文件: {}", e));
-                return result;
+                Err(repair_error) => {
+                    result.pdf_repair_status = "修复失败".to_string();
+                    result.error = Some(format!(
+                        "无法加载 PDF 文件: {original_error}；自动修复失败: {repair_error}"
+                    ));
+                    return result;
+                }
             }
+        }
+        Err(e) => {
+            result.error = Some(format!("无法加载 PDF 文件: {e}（PDF 自动修复未启用）"));
+            return result;
         }
     };
 
@@ -1543,7 +1466,8 @@ pub fn process_pdf_with_bookmark_confirmation(
             .iter()
             .any(|&width| (width - target_width).abs() >= 0.01);
     let needs_page_geometry_change = needs_page_normalization || has_true_crop_work;
-    let needs_modification = needs_page_geometry_change
+    let needs_modification = pdf_repaired
+        || needs_page_geometry_change
         || result.optimized_images > 0
         || bookmarks_repaired
         || result.bookmarks_fit_width > 0;
@@ -1606,7 +1530,8 @@ pub fn process_pdf_with_bookmark_confirmation(
                 .unwrap_or(0);
 
             // A compression-only run must never leave the user with a larger file.
-            if !needs_page_geometry_change
+            if !pdf_repaired
+                && !needs_page_geometry_change
                 && !bookmarks_repaired
                 && result.bookmarks_fit_width == 0
                 && result.original_bytes > 0
@@ -1632,6 +1557,69 @@ pub fn process_pdf_with_bookmark_confirmation(
 mod tests {
     use super::*;
     use lopdf::dictionary;
+
+    #[test]
+    fn pdf_repair_switch_controls_recovery_and_repair_only_writes_a_copy() {
+        let dir = std::env::temp_dir().join(format!(
+            "foliomend_pdf_repair_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("broken.pdf");
+        let original = crate::pdf_repair::shifted_fixture();
+        std::fs::write(&input, &original).unwrap();
+        let options = ProcessOptions {
+            repair_pdf: false,
+            compress_images: false,
+            normalize_pages: false,
+            repair_bookmarks: false,
+            fit_bookmarks_to_width: false,
+            ..ProcessOptions::default()
+        };
+        let off =
+            process_pdf_with_options_and_progress(input.to_str().unwrap(), options, &mut |_| {});
+        assert!(!off.success);
+        assert_eq!(off.pdf_repair_status, "未启用");
+        assert!(off.output_path.is_empty());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let mut phases = Vec::new();
+        let on = process_pdf_with_options_and_progress(
+            input.to_str().unwrap(),
+            ProcessOptions {
+                repair_pdf: true,
+                ..options
+            },
+            &mut |p| phases.push(p.phase),
+        );
+        assert!(on.success, "{:?}", on.error);
+        assert_eq!(on.pdf_repair_status, "已修复 PDF 索引");
+        assert!(phases.iter().any(|p| p == "修复 PDF 索引"));
+        let output = Document::load(&on.output_path).unwrap();
+        assert_eq!(output.get_pages().len(), 1);
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+        // Enabling recovery on a valid file must not force an output copy.
+        let healthy = process_pdf_with_options_and_progress(
+            &on.output_path,
+            ProcessOptions {
+                repair_pdf: true,
+                ..options
+            },
+            &mut |_| {},
+        );
+        assert!(healthy.success);
+        assert_eq!(healthy.pdf_repair_status, "无需修复");
+        assert!(healthy.output_path.starts_with("无需处理"));
+        assert!(ProcessOptions::default().repair_pdf);
+        assert!(
+            serde_json::from_str::<ProcessOptions>("{}")
+                .unwrap()
+                .repair_pdf
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn cropped_page_document() -> (Document, ObjectId) {
         let mut doc = Document::with_version("1.5");
