@@ -5,6 +5,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 let selectedFiles = [];
 let stopProgressListener = null;
 let activeOptions = null;
+let isProcessing = false;
 
 const btnSelect = document.getElementById("btn-select");
 const btnProcess = document.getElementById("btn-process");
@@ -36,11 +37,47 @@ optionFitBookmarks.addEventListener("change", () => {
 });
 const cropMode = document.getElementById("crop-mode");
 const cropModeHint = document.getElementById("crop-mode-hint");
+const widthMode = document.getElementById("width-mode");
+const widthControls = document.getElementById("width-controls");
+const customWidth = document.getElementById("custom-width");
+const customWidthRow = document.getElementById("custom-width-row");
+const widthModeHint = document.getElementById("width-mode-hint");
+
+try {
+    widthMode.value = localStorage.getItem("widthMode") === "userDefined" ? "userDefined" : "auto";
+    customWidth.value = localStorage.getItem("customWidth") || "";
+} catch (_) {}
+
+function updateWidthOptions() {
+    const isCustom = widthMode.value === "userDefined";
+    widthMode.disabled = isProcessing || !optionNormalizePages.checked;
+    customWidth.disabled = widthMode.disabled || !isCustom;
+    customWidthRow.classList.toggle("initially-hidden", !isCustom);
+    widthControls.classList.toggle("is-custom", isCustom);
+    widthModeHint.textContent = !optionNormalizePages.checked
+        ? "开启“统一页面宽度”后，可设置目标宽度。"
+        : isCustom
+            ? "本批次全部 PDF 使用同一宽度；A4 短边约 595.28 pt。"
+            : "为每个 PDF 分别识别合适的宽度，自动排除异常宽页的影响。";
+}
+
+optionNormalizePages.addEventListener("change", updateWidthOptions);
+widthMode.addEventListener("change", () => {
+    try { localStorage.setItem("widthMode", widthMode.value); } catch (_) {}
+    updateWidthOptions();
+});
+customWidth.addEventListener("input", () => {
+    try { localStorage.setItem("customWidth", customWidth.value); } catch (_) {}
+});
 
 function getProcessingOptions() {
     return {
         compressImages: optionCompressImages.checked,
         normalizePages: optionNormalizePages.checked,
+        widthMode: widthMode.value,
+        customWidth: optionNormalizePages.checked && widthMode.value === "userDefined"
+            ? customWidth.valueAsNumber
+            : null,
         cropMode: cropMode.value,
         repairPdf: optionRepairPdf.checked,
         repairBookmarks: optionRepairBookmarks.checked,
@@ -50,8 +87,8 @@ function getProcessingOptions() {
 
 function updateCropModeHint() {
     cropModeHint.textContent = cropMode.value === "trueCrop"
-        ? "把 MediaBox 直接裁到 CropBox；若同时开启页面归一化，还会统一裁剪后的可见宽度。"
-        : "保留原始 MediaBox；开启页面归一化时，按 CropBox 的实际可见宽度等比对齐。";
+        ? "将页面边界裁到当前可见区域；启用统一宽度时，同时等比缩放。"
+        : "保留页面边界与裁剪设置；启用统一宽度时，以可见区域为准缩放。";
 }
 
 cropMode.addEventListener("change", updateCropModeHint);
@@ -164,6 +201,16 @@ btnClear.addEventListener("click", () => {
 btnProcess.addEventListener("click", async () => {
     if (selectedFiles.length === 0) return;
 
+    const options = getProcessingOptions();
+    if (options.normalizePages && options.widthMode === "userDefined"
+        && (!Number.isFinite(options.customWidth) || options.customWidth <= 0)) {
+        showMessage("请输入大于 0 的有效目标宽度（单位 pt）。");
+        customWidth.focus();
+        return;
+    }
+
+    isProcessing = true;
+    updateWidthOptions();
     btnProcess.disabled = true;
     btnSelect.disabled = true;
     optionCompressImages.disabled = true;
@@ -179,7 +226,7 @@ btnProcess.addEventListener("click", async () => {
     progressText.textContent = `正在处理 ${selectedFiles.length} 个文件...`;
 
     try {
-        activeOptions = getProcessingOptions();
+        activeOptions = options;
         stopProgressListener = await listen("pdf-progress", (event) => {
             const progress = event.payload || {};
             const percent = Math.round(Math.max(0, Math.min(1, progress.progress || 0)) * 100);
@@ -215,6 +262,7 @@ btnProcess.addEventListener("click", async () => {
         progressFill.style.width = "100%";
         progressFill.style.background = "#d63031";
     } finally {
+        isProcessing = false;
         if (stopProgressListener) {
             stopProgressListener();
             stopProgressListener = null;
@@ -227,6 +275,7 @@ btnProcess.addEventListener("click", async () => {
         optionRepairPdf.disabled = false;
         optionRepairBookmarks.disabled = false;
         optionFitBookmarks.disabled = false;
+        updateWidthOptions();
     }
 });
 
@@ -248,7 +297,7 @@ function showResults(results) {
                     ? `体积: ${formatBytes(r.original_bytes)} → ${formatBytes(r.output_bytes)}（${sizeChangeText}）<br>`
                     : `原始体积: ${formatBytes(r.original_bytes)}<br>`;
                 const normalizationDetail = options.normalizePages
-                    ? `可见宽度范围: ${minW} ~ ${maxW} pt | 目标宽度: ${r.target_width.toFixed(1)} pt`
+                    ? `可见宽度范围: ${minW} ~ ${maxW} pt | 目标宽度（${options.widthMode === "userDefined" ? "自定义" : "自动识别"}）: ${r.target_width.toFixed(2)} pt`
                     : "页面归一化：未启用";
                 const imageDetail = options.compressImages
                     ? `图像识别: 彩色 ${r.color_images} | 灰度 ${r.grayscale_images} | 纯黑白 ${r.monochrome_images} | 已压缩 ${r.optimized_images} | 跳过 ${r.skipped_images}`
@@ -286,6 +335,7 @@ function showResults(results) {
 
 // 初始化
 updateCropModeHint();
+updateWidthOptions();
 updateFileList();
 
 // 拖拽文件支持

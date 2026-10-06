@@ -107,7 +107,8 @@ h2 {
     font-weight: 500;
 }
 
-.select-option select {
+.select-option select,
+.select-option input {
     width: 100%;
     padding: 9px 12px;
     border: 1px solid #dfe6e9;
@@ -118,7 +119,8 @@ h2 {
     outline: none;
 }
 
-.select-option select:focus {
+.select-option select:focus,
+.select-option input:focus {
     border-color: #0984e3;
 }
 
@@ -381,6 +383,19 @@ h2 {
     color: #0984e3;
     box-shadow: 0 4px 16px rgba(0,0,0,0.1);
 }
+
+.width-options { margin: 18px 0; }
+.select-option select:disabled, .select-option input:disabled { background: #f4f6fa; color: #919bac; cursor: not-allowed; }
+.width-controls { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.width-controls.is-custom { grid-template-columns: minmax(92px, 0.9fr) minmax(0, 1.1fr); }
+.custom-width-control { display: flex; align-items: center; min-width: 0; border: 1px solid #dce2ec; border-radius: 8px; background: white; }
+.select-option .custom-width-control input { flex: 1; border: none; padding-right: 6px; }
+.custom-width-control:has(input:disabled) { background: #f4f6fa; }
+.custom-width-control:focus-within { outline: 3px solid #b8c3ff; outline-offset: 3px; }
+.custom-width-control input:focus-visible { outline: none; }
+.input-unit { padding-right: 10px; color: #636e72; font-size: 11px; font-weight: 400; }
+.width-options .option-hint { min-height: 3.4em; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
 .initially-hidden {
     display: none;

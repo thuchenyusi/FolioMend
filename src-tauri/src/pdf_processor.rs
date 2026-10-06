@@ -47,11 +47,20 @@ pub enum CropBoxMode {
     TrueCrop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WidthMode {
+    Auto,
+    UserDefined,
+}
+
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProcessOptions {
     pub compress_images: bool,
     pub normalize_pages: bool,
+    pub width_mode: WidthMode,
+    pub custom_width: Option<f64>,
     pub crop_mode: CropBoxMode,
     pub repair_pdf: bool,
     pub repair_bookmarks: bool,
@@ -63,11 +72,25 @@ impl Default for ProcessOptions {
         Self {
             compress_images: true,
             normalize_pages: true,
+            width_mode: WidthMode::Auto,
+            custom_width: None,
             crop_mode: CropBoxMode::AlignVisible,
             repair_pdf: true,
             repair_bookmarks: true,
             fit_bookmarks_to_width: false,
         }
+    }
+}
+
+impl ProcessOptions {
+    fn validate(self) -> Result<(), String> {
+        if self.normalize_pages && self.width_mode == WidthMode::UserDefined {
+            match self.custom_width {
+                Some(width) if width.is_finite() && width > 0.0 => {}
+                _ => return Err("请输入大于 0 的有效目标宽度（单位 pt）。".to_string()),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1333,6 +1356,11 @@ pub fn process_pdf_with_bookmark_confirmation(
         error: None,
     };
 
+    if let Err(error) = options.validate() {
+        result.error = Some(error);
+        return result;
+    }
+
     // 完整加载并重写文档，避免增量保存把旧图像字节继续保留在输出中。
     let mut pdf_repaired = false;
     let loaded = Document::load(path).and_then(|doc| {
@@ -1447,7 +1475,10 @@ pub fn process_pdf_with_bookmark_confirmation(
 
     // 归一化以页面实际可见宽度（CropBox，没有时回退到 MediaBox）为准。
     let target_width = if options.normalize_pages {
-        calculate_target_width(&widths)
+        match options.width_mode {
+            WidthMode::Auto => calculate_target_width(&widths),
+            WidthMode::UserDefined => options.custom_width.expect("validated custom width"),
+        }
     } else {
         0.0
     };
@@ -2162,6 +2193,157 @@ mod tests {
             .unwrap()
             .get(b"Outlines")
             .is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn width_options_deserialize_with_auto_default_and_custom_value() {
+        let defaults: ProcessOptions = serde_json::from_str(r#"{"normalizePages":true}"#).unwrap();
+        assert_eq!(defaults.width_mode, WidthMode::Auto);
+        assert_eq!(defaults.custom_width, None);
+        let custom: ProcessOptions =
+            serde_json::from_str(r#"{"widthMode":"userDefined","customWidth":595.28}"#).unwrap();
+        assert_eq!(custom.width_mode, WidthMode::UserDefined);
+        assert_eq!(custom.custom_width, Some(595.28));
+        assert!(custom.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_custom_width_fails_before_loading_and_is_ignored_when_inactive() {
+        for custom_width in [
+            None,
+            Some(0.0),
+            Some(-10.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+        ] {
+            let options = ProcessOptions {
+                width_mode: WidthMode::UserDefined,
+                custom_width,
+                ..ProcessOptions::default()
+            };
+            let result = process_pdf_with_options_and_progress(
+                "missing-width-validation-fixture.pdf",
+                options,
+                &mut |_| {},
+            );
+            assert!(!result.success);
+            assert!(result.error.unwrap().contains("目标宽度"));
+            assert!(result.output_path.is_empty());
+            assert!(ProcessOptions {
+                normalize_pages: false,
+                ..options
+            }
+            .validate()
+            .is_ok());
+            assert!(ProcessOptions {
+                width_mode: WidthMode::Auto,
+                ..options
+            }
+            .validate()
+            .is_ok());
+        }
+    }
+
+    #[test]
+    fn width_modes_write_visible_widths_and_preserve_aspect_ratio_and_bookmarks() {
+        let dir = std::env::temp_dir().join(format!(
+            "foliomend_width_modes_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("book.pdf");
+        let (mut doc, _, bookmark) = outline_fixture(true);
+        let page = *doc.get_pages().values().next().unwrap();
+        let parent = doc
+            .get_dictionary(page)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let mut rotated = doc.get_dictionary(page).unwrap().clone();
+        rotated.set("Rotate", 90);
+        let rotated = doc.add_object(rotated);
+        let pages = doc.get_dictionary_mut(parent).unwrap();
+        pages.set(
+            "Kids",
+            vec![Object::Reference(page), Object::Reference(rotated)],
+        );
+        pages.set("Count", 2);
+        doc.get_dictionary_mut(bookmark).unwrap().set(
+            "Dest",
+            vec![
+                Object::Reference(page),
+                Object::Name(b"FitH".to_vec()),
+                500.into(),
+            ],
+        );
+        doc.save(&input).unwrap();
+        let original = std::fs::read(&input).unwrap();
+        let options = ProcessOptions {
+            compress_images: false,
+            repair_pdf: false,
+            repair_bookmarks: false,
+            ..ProcessOptions::default()
+        };
+        for crop_mode in [CropBoxMode::AlignVisible, CropBoxMode::TrueCrop] {
+            for (width_mode, custom_width, expected) in [
+                (WidthMode::Auto, Some(123.0), 600.0),
+                (WidthMode::UserDefined, Some(300.0), 300.0),
+                (WidthMode::UserDefined, Some(720.25), 720.25),
+            ] {
+                let result = process_pdf_with_options_and_progress(
+                    input.to_str().unwrap(),
+                    ProcessOptions {
+                        width_mode,
+                        custom_width,
+                        crop_mode,
+                        ..options
+                    },
+                    &mut |_| {},
+                );
+                assert!(result.success, "{:?}", result.error);
+                assert_eq!(result.original_widths, vec![450.0, 600.0]);
+                assert_eq!(result.target_width, expected);
+                let output = Document::load(&result.output_path).unwrap();
+                for id in output.get_pages().into_values() {
+                    assert!((get_visible_page_width(&output, id).unwrap() - expected).abs() < 0.01);
+                    let (media, crop, _) = get_page_boxes(&output, id).unwrap();
+                    assert!((crop.width() / crop.height() - 0.75).abs() < 0.0001);
+                    assert_eq!(
+                        media.approximately_equals(crop),
+                        crop_mode == CropBoxMode::TrueCrop
+                    );
+                }
+                let destination = output
+                    .get_dictionary(bookmark)
+                    .unwrap()
+                    .get(b"Dest")
+                    .unwrap()
+                    .as_array()
+                    .unwrap();
+                let expected_y = 200.0 + (500.0 - 200.0) * expected / 450.0;
+                assert!((get_number(&destination[2]).unwrap() - expected_y).abs() < 0.01);
+            }
+        }
+        let disabled = process_pdf_with_options_and_progress(
+            input.to_str().unwrap(),
+            ProcessOptions {
+                normalize_pages: false,
+                width_mode: WidthMode::UserDefined,
+                custom_width: None,
+                ..options
+            },
+            &mut |_| {},
+        );
+        assert!(disabled.success);
+        assert_eq!(disabled.target_width, 0.0);
+        assert!(disabled.output_path.starts_with("无需处理"));
+        assert_eq!(std::fs::read(&input).unwrap(), original);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

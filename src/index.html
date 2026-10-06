@@ -47,7 +47,7 @@
                 <label class="check-option">
                     <input id="option-normalize-pages" type="checkbox" checked>
                     <span>
-                        <strong>页面归一化</strong>
+                        <strong>统一页面宽度</strong>
                         <small>以实际可见区域为准，统一页面在阅读器中的显示宽度</small>
                     </span>
                 </label>
@@ -68,6 +68,23 @@
                 </span>
             </label>
 
+            <div class="width-options">
+                <div class="select-option">
+                    <label for="width-mode">目标宽度</label>
+                    <div id="width-controls" class="width-controls">
+                        <select id="width-mode" aria-describedby="width-mode-hint">
+                            <option value="auto">自动识别</option>
+                            <option value="userDefined">自定义</option>
+                        </select>
+                        <label id="custom-width-row" class="custom-width-control initially-hidden" for="custom-width">
+                            <span class="sr-only">自定义宽度（pt）</span>
+                            <input id="custom-width" type="number" min="0" step="any" placeholder="例如 595.28" title="单位 pt；72 pt = 1 英寸，A4 短边约 595.28 pt" aria-describedby="width-mode-hint" disabled>
+                            <span class="input-unit" aria-hidden="true">pt</span>
+                        </label>
+                    </div>
+                </div>
+                <p id="width-mode-hint" class="option-hint"></p>
+            </div>
             <label class="select-option" for="crop-mode">
                 <span>CropBox 处理方式</span>
                 <select id="crop-mode">
