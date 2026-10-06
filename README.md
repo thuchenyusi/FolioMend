@@ -37,7 +37,7 @@ FolioMend 不会上传 PDF；文件选择、解析和输出均在本机完成。
 ## 开发环境
 
 - [Node.js](https://nodejs.org/) 22.12 或更高版本
-- [Rust](https://www.rust-lang.org/tools/install)
+- [Rust](https://www.rust-lang.org/tools/install) 1.90 或更高版本
 - [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)
 
 ## 本地运行
