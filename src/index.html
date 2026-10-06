@@ -131,10 +131,25 @@
             <p id="progress-text" class="progress-text">处理中...</p>
         </div>
 
-        <div id="results-section" class="results-section initially-hidden">
-            <h2>处理结果</h2>
-            <div id="results-list" class="results-list"></div>
-        </div>
+        <section id="results-section" class="results-section initially-hidden" aria-labelledby="results-title">
+            <div class="results-heading">
+                <h2 id="results-title">处理结果</h2>
+                <div id="results-controls" class="results-controls" hidden>
+                    <button id="btn-results-expand-all" class="btn btn-small" aria-controls="results-overview">全部展开</button>
+                    <button id="btn-results-collapse-all" class="btn btn-secondary" aria-controls="results-overview">全部收起</button>
+                </div>
+            </div>
+            <details id="results-overview" class="results-overview">
+                <summary class="results-overview-summary">
+                    <span id="results-summary" class="results-count">暂无处理结果</span>
+                    <span class="results-fold-label">
+                        <span class="fold-closed">展开文件列表</span>
+                        <span class="fold-open">收起文件列表</span>
+                    </span>
+                </summary>
+                <div id="results-list" class="results-list"></div>
+            </details>
+        </section>
     </div>
 
     <footer class="action-section">

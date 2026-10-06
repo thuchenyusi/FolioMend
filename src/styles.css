@@ -197,14 +197,42 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .progress-bar { height: 7px; background: #edf0f6; border-radius: 6px; overflow: hidden; margin-bottom: 12px; }
 .progress-fill { height: 100%; background: var(--accent); border-radius: 6px; transition: width 300ms; width: 0%; }
 .progress-text { font-size: 12px; color: var(--muted); text-align: center; }
-.results-section > h2 { margin-bottom: 16px; }
-.result-item { padding: 16px; border: 1px solid var(--border); border-radius: 9px; margin-bottom: 12px; }
-.result-item:last-child { margin-bottom: 0; }
+.results-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.results-controls { display: flex; gap: 8px; }
+.results-controls[hidden] { display: none; }
+.results-controls .btn { padding: 6px 10px; font-size: 11px; }
+.results-overview-summary, .result-file-summary { cursor: pointer; list-style: none; }
+.results-overview-summary::-webkit-details-marker, .result-file-summary::-webkit-details-marker { display: none; }
+.results-overview-summary::before, .result-file-summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid #8592a8; border-bottom: 1.5px solid #8592a8; transform: rotate(-45deg); }
+.results-overview[open] > summary::before, .result-item[open] > summary::before { transform: rotate(45deg); }
+.results-overview-summary { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px; background: #f7f8fc; }
+.results-overview-summary:hover { background: #f0f3fa; }
+.results-count { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: #67758d; }
+.results-count-success { color: #498069; }
+.results-count-error { color: #be4f64; }
+.results-fold-label { margin-left: auto; flex-shrink: 0; font-size: 11px; color: var(--accent); }
+.results-overview.is-message .results-fold-label { display: none; }
+.fold-open, .results-overview[open] .fold-closed { display: none; }
+.results-overview[open] .fold-open { display: inline; }
+.results-list { display: grid; gap: 10px; }
+.results-overview[open] .results-list { margin-top: 12px; }
+.result-item { min-width: 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
 .result-item.success { border-left: 3px solid #66a58c; }
 .result-item.error { border-left: 3px solid #ce7081; }
-.result-filename { font-weight: 600; font-size: 13px; margin-bottom: 6px; word-break: break-all; }
-.result-detail { font-size: 12px; color: var(--muted); line-height: 1.8; overflow-wrap: anywhere; }
-.result-error { color: #be4f64; font-size: 12px; margin-top: 4px; }
+.result-file-summary { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 12px 14px; }
+.result-file-summary:hover { background: #fafbfe; }
+.result-summary-main { display: grid; min-width: 0; gap: 3px; }
+.result-filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 12px; }
+.result-preview { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.result-error-preview { color: #be4f64; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.result-status { padding: 3px 8px; border-radius: 6px; font-size: 10px; white-space: nowrap; }
+.result-status.success { color: #498069; background: #f0f8f4; }
+.result-status.error { color: #be4f64; background: #fdf0f2; }
+.result-detail { padding: 14px 16px; border-top: 1px solid var(--border); background: #fafbfe; font-size: 12px; color: var(--muted); line-height: 1.8; overflow-wrap: anywhere; }
+.result-source { margin-bottom: 8px; color: #5d6c84; }
+.result-error { color: #be4f64; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+.result-message { padding: 12px 14px; border: 1px solid var(--border); border-radius: 9px; }
+summary:focus-visible { outline: 3px solid #b8c3ff; outline-offset: 2px; }
 .drop-overlay { position: fixed; inset: 0; background: #5566d91a; border: 3px dashed var(--accent); display: flex; align-items: center; justify-content: center; z-index: 100; pointer-events: none; }
 .drop-message { background: white; padding: 24px 40px; border-radius: 14px; font-size: 18px; font-weight: 600; color: var(--accent); box-shadow: 0 10px 40px #23304714; }
 .initially-hidden { display: none; }

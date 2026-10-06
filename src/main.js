@@ -18,6 +18,20 @@ const progressFill = document.getElementById("progress-fill");
 const progressText = document.getElementById("progress-text");
 const resultsSection = document.getElementById("results-section");
 const resultsList = document.getElementById("results-list");
+const resultsOverview = document.getElementById("results-overview");
+const resultsSummary = document.getElementById("results-summary");
+const resultsControls = document.getElementById("results-controls");
+const btnResultsExpandAll = document.getElementById("btn-results-expand-all");
+const btnResultsCollapseAll = document.getElementById("btn-results-collapse-all");
+
+btnResultsExpandAll.addEventListener("click", () => {
+    resultsOverview.open = true;
+    for (const file of resultsList.querySelectorAll("details.result-item")) file.open = true;
+});
+btnResultsCollapseAll.addEventListener("click", () => {
+    for (const file of resultsList.querySelectorAll("details.result-item")) file.open = false;
+    resultsOverview.open = false;
+});
 const optionCompressImages = document.getElementById("option-compress-images");
 const optionNormalizePages = document.getElementById("option-normalize-pages");
 const optionRepairPdf = document.getElementById("option-repair-pdf");
@@ -131,7 +145,11 @@ function formatBytes(bytes) {
 
 function showMessage(message, type = "error") {
     resultsSection.style.display = "block";
-    resultsList.innerHTML = `<div class="result-item ${type}">
+    resultsOverview.open = true;
+    resultsOverview.classList.add("is-message");
+    resultsControls.hidden = true;
+    resultsSummary.textContent = "提示信息";
+    resultsList.innerHTML = `<div class="result-message ${type}">
         <div class="result-error">${escapeHtml(message)}</div>
     </div>`;
 }
@@ -281,56 +299,76 @@ btnProcess.addEventListener("click", async () => {
 
 function showResults(results) {
     resultsSection.style.display = "block";
-    resultsList.innerHTML = results
-        .map((r) => {
-            if (r.success) {
-                const minW = Math.min(...r.original_widths).toFixed(1);
-                const maxW = Math.max(...r.original_widths).toFixed(1);
-                const options = activeOptions || getProcessingOptions();
-                const sizeChange = r.original_bytes > 0
-                    ? (1 - r.output_bytes / r.original_bytes) * 100
-                    : 0;
-                const sizeChangeText = sizeChange >= 0
-                    ? `减少 ${sizeChange.toFixed(1)}%`
-                    : `增加 ${Math.abs(sizeChange).toFixed(1)}%`;
-                const sizeDetail = r.output_bytes > 0
-                    ? `体积: ${formatBytes(r.original_bytes)} → ${formatBytes(r.output_bytes)}（${sizeChangeText}）<br>`
-                    : `原始体积: ${formatBytes(r.original_bytes)}<br>`;
-                const normalizationDetail = options.normalizePages
-                    ? `可见宽度范围: ${minW} ~ ${maxW} pt | 目标宽度（${options.widthMode === "userDefined" ? "自定义" : "自动识别"}）: ${r.target_width.toFixed(2)} pt`
-                    : "页面归一化：未启用";
-                const imageDetail = options.compressImages
-                    ? `图像识别: 彩色 ${r.color_images} | 灰度 ${r.grayscale_images} | 纯黑白 ${r.monochrome_images} | 已压缩 ${r.optimized_images} | 跳过 ${r.skipped_images}`
-                    : "图片压缩：未启用";
-                const cropDetail = options.cropMode === "trueCrop"
-                    ? "CropBox：真正裁剪（MediaBox 与可见区域一致）"
-                    : "CropBox：按裁剪后的可见宽度对齐";
-                return `
-                <div class="result-item success">
-                    <div class="result-filename">${escapeHtml(r.input_path)}</div>
-                    <div class="result-detail">
-                        页数: ${r.page_count} | 
-                        ${normalizationDetail}<br>
-                        ${cropDetail}<br>
-                        ${imageDetail}<br>
-                        PDF 自动修复：${escapeHtml(r.pdf_repair_status || "未启用")}<br>
-                        书签检测：${escapeHtml(r.bookmark_status || "未启用")}<br>
-                        ${options.fitBookmarksToWidth ? `书签适合宽度：已更新 ${r.bookmarks_fit_width || 0}，跳过 ${r.bookmarks_fit_width_skipped || 0}（外部链接或无法解析的目标）<br>` : ""}
-                        ${sizeDetail}
-                        输出文件: ${escapeHtml(r.output_path)}
-                    </div>
-                </div>
+    resultsOverview.open = false;
+    resultsOverview.classList.remove("is-message");
+    resultsControls.hidden = results.length === 0;
+    const succeeded = results.filter((result) => result.success).length;
+    const failed = results.length - succeeded;
+    resultsSummary.innerHTML = results.length
+        ? `<span>共 ${results.length} 个文件</span><span class="results-count-success">成功 ${succeeded}</span><span class="${failed ? "results-count-error" : ""}">失败 ${failed}</span>`
+        : "暂无处理结果";
+    const options = activeOptions || getProcessingOptions();
+    resultsList.innerHTML = results.map((r) => {
+        const filename = r.input_path.split(/[\\/]/).pop() || r.input_path;
+        const status = r.success ? (r.output_bytes > 0 ? "已输出" : "无需处理") : "失败";
+        const statusClass = r.success ? "success" : "error";
+        let preview;
+        let detail;
+        if (r.success) {
+            const minW = Math.min(...r.original_widths).toFixed(1);
+            const maxW = Math.max(...r.original_widths).toFixed(1);
+            const sizeChange = r.original_bytes > 0
+                ? (1 - r.output_bytes / r.original_bytes) * 100
+                : 0;
+            const sizeChangeText = sizeChange >= 0
+                ? `减少 ${sizeChange.toFixed(1)}%`
+                : `增加 ${Math.abs(sizeChange).toFixed(1)}%`;
+            preview = r.output_bytes > 0
+                ? `${r.page_count} 页 · ${formatBytes(r.original_bytes)} → ${formatBytes(r.output_bytes)} · ${sizeChangeText}`
+                : `${r.page_count} 页 · 无需生成新文件`;
+            const sizeDetail = r.output_bytes > 0
+                ? `体积: ${formatBytes(r.original_bytes)} → ${formatBytes(r.output_bytes)}（${sizeChangeText}）<br>`
+                : `原始体积: ${formatBytes(r.original_bytes)}<br>`;
+            const normalizationDetail = options.normalizePages
+                ? `可见宽度范围: ${minW} ~ ${maxW} pt | 目标宽度（${options.widthMode === "userDefined" ? "自定义" : "自动识别"}）: ${r.target_width.toFixed(2)} pt`
+                : "页面归一化：未启用";
+            const imageDetail = options.compressImages
+                ? `图像识别: 彩色 ${r.color_images} | 灰度 ${r.grayscale_images} | 纯黑白 ${r.monochrome_images} | 已压缩 ${r.optimized_images} | 跳过 ${r.skipped_images}`
+                : "图片压缩：未启用";
+            const cropDetail = options.cropMode === "trueCrop"
+                ? "CropBox：真正裁剪（MediaBox 与可见区域一致）"
+                : "CropBox：按裁剪后的可见宽度对齐";
+            detail = `
+                页数: ${r.page_count} | ${normalizationDetail}<br>
+                ${cropDetail}<br>
+                ${imageDetail}<br>
+                PDF 自动修复：${escapeHtml(r.pdf_repair_status || "未启用")}<br>
+                书签检测：${escapeHtml(r.bookmark_status || "未启用")}<br>
+                ${options.fitBookmarksToWidth ? `书签适合宽度：已更新 ${r.bookmarks_fit_width || 0}，跳过 ${r.bookmarks_fit_width_skipped || 0}（外部链接或无法解析的目标）<br>` : ""}
+                ${sizeDetail}
+                输出文件: ${escapeHtml(r.output_path)}
             `;
-            } else {
-                return `
-                <div class="result-item error">
-                    <div class="result-filename">${escapeHtml(r.input_path)}</div>
-                    <div class="result-error">错误: ${escapeHtml(r.error || "未知错误")}</div>
+        } else {
+            preview = escapeHtml(r.error || "未知错误");
+            detail = `<div class="result-error">错误: ${escapeHtml(r.error || "未知错误")}</div>`;
+        }
+        const previewTitle = r.success ? "" : ` title="${escapeHtml(r.error || "未知错误")}"`;
+        return `
+            <details class="result-item ${statusClass}">
+                <summary class="result-file-summary">
+                    <span class="result-summary-main">
+                        <span class="result-filename" title="${escapeHtml(r.input_path)}">${escapeHtml(filename)}</span>
+                        <span class="result-preview ${r.success ? "" : "result-error-preview"}"${previewTitle}>${preview}</span>
+                    </span>
+                    <span class="result-status ${statusClass}">${status}</span>
+                </summary>
+                <div class="result-detail">
+                    <div class="result-source">输入文件: ${escapeHtml(r.input_path)}</div>
+                    ${detail}
                 </div>
-            `;
-            }
-        })
-        .join("");
+            </details>
+        `;
+    }).join("");
 }
 
 // 初始化
