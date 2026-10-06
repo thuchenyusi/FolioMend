@@ -13,10 +13,10 @@
   },
   "keywords": [],
   "devDependencies": {
-    "@tauri-apps/cli": "^2.10.1",
+    "@tauri-apps/cli": "~2.12.1",
     "vite": "^7.3.6"
   },
   "dependencies": {
-    "@tauri-apps/api": "~2.10.1"
+    "@tauri-apps/api": "~2.12.1"
   }
 }
