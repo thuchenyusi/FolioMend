@@ -78,6 +78,7 @@ jobs:
           $stage = New-Item -ItemType Directory -Path "dist/$name" -Force
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/foliomend.exe "$stage/FolioMend.exe"
           Copy-Item README.md "$stage/README.md"
+          Copy-Item LICENSE "$stage/LICENSE"
           @'
           FolioMend Windows x64 Portable
 
@@ -86,6 +87,8 @@ jobs:
           WebView2 下载：https://developer.microsoft.com/microsoft-edge/webview2/
           此包不包含 WebView2 Runtime，应用的 WebView 缓存使用系统用户目录。
           输出 PDF 保存在原文件目录，请确保该目录可写。
+          开源协议：MPL-2.0，完整协议见 LICENSE。
+          对应版本源码：https://github.com/${{ github.repository }}/tree/${{ github.ref_name }}
           '@ | Set-Content "$stage/使用说明.txt" -Encoding utf8
           $zip = "dist/$name.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $zip

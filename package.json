@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "本地批量归一化、裁剪和压缩扫描 PDF 的桌面工具",
+  "license": "MPL-2.0",
   "scripts": {
     "check": "node --check src/main.js",
     "frontend:dev": "vite",

@@ -87,3 +87,9 @@ npm run build
 ## 项目状态
 
 FolioMend 目前处于早期开发阶段。处理重要文件前，建议保留原始 PDF 备份。
+
+## 开源协议
+
+FolioMend 的源代码采用 [Mozilla Public License 2.0（MPL-2.0）](LICENSE)，完整协议见仓库根目录的 `LICENSE` 文件。第三方依赖遵循各自的许可证。
+
+源码可在 [GitHub 仓库](https://github.com/thuchenyusi/FolioMend) 获取；发布版本对应的源码可在该仓库的 Tags 或 Releases 页面下载。
