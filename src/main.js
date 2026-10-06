@@ -13,24 +13,161 @@ const btnClear = document.getElementById("btn-clear");
 const btnAddPath = document.getElementById("btn-add-path");
 const manualPath = document.getElementById("manual-path");
 const fileList = document.getElementById("file-list");
-const progressSection = document.getElementById("progress-section");
 const progressFill = document.getElementById("progress-fill");
 const progressText = document.getElementById("progress-text");
 const resultsSection = document.getElementById("results-section");
 const resultsList = document.getElementById("results-list");
-const resultsOverview = document.getElementById("results-overview");
 const resultsSummary = document.getElementById("results-summary");
 const resultsControls = document.getElementById("results-controls");
 const btnResultsExpandAll = document.getElementById("btn-results-expand-all");
 const btnResultsCollapseAll = document.getElementById("btn-results-collapse-all");
+const tabFiles = document.getElementById("tab-files");
+const tabResults = document.getElementById("tab-results");
+const fileCount = document.getElementById("file-count");
+const progressBar = document.getElementById("progress-bar");
+const optionHelp = document.getElementById("btn-option-help");
+const optionsGrid = document.getElementById("options-grid");
+
+for (const label of optionsGrid.querySelectorAll(".check-option")) {
+    label.title = label.querySelector("small").textContent;
+}
+optionHelp.addEventListener("click", () => {
+    const expanded = optionsGrid.classList.toggle("show-descriptions");
+    optionHelp.setAttribute("aria-expanded", String(expanded));
+    optionHelp.textContent = expanded ? "收起说明" : "显示说明";
+});
+
+// Help lives above the scroll panels so opening it never changes their geometry.
+let activeHelpButton = null;
+let activeHelpPopover = null;
+let helpPinned = false;
+let helpCloseTimer = null;
+
+function closeHelp() {
+    clearTimeout(helpCloseTimer);
+    if (!activeHelpButton) return;
+    activeHelpButton.setAttribute("aria-expanded", "false");
+    if (typeof activeHelpPopover.hidePopover === "function") activeHelpPopover.hidePopover();
+    activeHelpPopover.classList.remove("is-open");
+    activeHelpButton = null;
+    activeHelpPopover = null;
+    helpPinned = false;
+}
+
+function openHelp(button, pin = false) {
+    clearTimeout(helpCloseTimer);
+    if (activeHelpButton !== button) closeHelp();
+    activeHelpButton = button;
+    activeHelpPopover = document.getElementById(button.getAttribute("aria-controls"));
+    helpPinned = pin || helpPinned;
+    button.setAttribute("aria-expanded", "true");
+    if (typeof activeHelpPopover.showPopover === "function") activeHelpPopover.showPopover();
+    else activeHelpPopover.classList.add("is-open");
+
+    const anchor = button.getBoundingClientRect();
+    const popup = activeHelpPopover.getBoundingClientRect();
+    const margin = 12;
+    const left = Math.max(margin, Math.min(anchor.left, window.innerWidth - popup.width - margin));
+    const below = anchor.bottom + 8;
+    const top = Math.max(margin, Math.min(
+        below + popup.height <= window.innerHeight - margin ? below : anchor.top - popup.height - 8,
+        window.innerHeight - popup.height - margin,
+    ));
+    activeHelpPopover.style.left = `${left}px`;
+    activeHelpPopover.style.top = `${top}px`;
+}
+
+function queueHelpClose() {
+    clearTimeout(helpCloseTimer);
+    helpCloseTimer = setTimeout(() => {
+        if (!activeHelpButton || helpPinned) return;
+        if (activeHelpButton.matches(":hover") || activeHelpPopover.matches(":hover")) return;
+        if (document.activeElement === activeHelpButton) return;
+        closeHelp();
+    }, 150);
+}
+
+for (const button of document.querySelectorAll(".info-button")) {
+    const popup = document.getElementById(button.getAttribute("aria-controls"));
+    button.addEventListener("pointerenter", () => {
+        if (!helpPinned || activeHelpButton === button) openHelp(button);
+    });
+    button.addEventListener("pointerleave", queueHelpClose);
+    button.addEventListener("focus", () => openHelp(button));
+    button.addEventListener("blur", queueHelpClose);
+    button.addEventListener("click", () => {
+        if (activeHelpButton === button && helpPinned) closeHelp();
+        else openHelp(button, true);
+    });
+    popup.addEventListener("pointerenter", () => clearTimeout(helpCloseTimer));
+    popup.addEventListener("pointerleave", queueHelpClose);
+}
+document.addEventListener("pointerdown", (event) => {
+    if (activeHelpButton && !activeHelpButton.contains(event.target)
+        && !activeHelpPopover.contains(event.target)) closeHelp();
+});
+document.addEventListener("focusin", (event) => {
+    if (activeHelpButton && !activeHelpButton.contains(event.target)
+        && !activeHelpPopover.contains(event.target)) closeHelp();
+});
+document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && activeHelpButton) {
+        event.preventDefault();
+        closeHelp();
+    }
+});
+document.addEventListener("scroll", (event) => {
+    if (!activeHelpButton || activeHelpPopover.contains(event.target)) return;
+    // Keyboard focus can scroll a help button into view; keep its explanation attached.
+    if (event.target === optionsGrid && !helpPinned && document.activeElement === activeHelpButton) {
+        const anchor = activeHelpButton.getBoundingClientRect();
+        const panel = optionsGrid.getBoundingClientRect();
+        if (anchor.bottom > panel.top && anchor.top < panel.bottom) {
+            openHelp(activeHelpButton);
+            return;
+        }
+    }
+    closeHelp();
+}, true);
+window.addEventListener("resize", closeHelp);
+
+function showWorkspace(view) {
+    closeHelp();
+    const showFiles = view === "files";
+    fileList.hidden = !showFiles;
+    resultsSection.hidden = showFiles;
+    tabFiles.setAttribute("aria-selected", String(showFiles));
+    tabResults.setAttribute("aria-selected", String(!showFiles));
+    tabFiles.tabIndex = showFiles ? 0 : -1;
+    tabResults.tabIndex = showFiles ? -1 : 0;
+}
+
+for (const [tab, view] of [[tabFiles, "files"], [tabResults, "results"]]) {
+    tab.addEventListener("click", () => showWorkspace(view));
+    tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const target = event.key === "Home" ? tabFiles
+            : event.key === "End" ? tabResults
+                : tab === tabFiles ? tabResults : tabFiles;
+        showWorkspace(target === tabFiles ? "files" : "results");
+        target.focus();
+    });
+}
+
+function setProgress(percent, text, isError = false) {
+    progressFill.style.width = `${percent}%`;
+    progressFill.style.background = isError ? "#d63031" : "";
+    progressBar.setAttribute("aria-valuenow", String(percent));
+    progressText.textContent = text;
+    progressText.title = text;
+}
 
 btnResultsExpandAll.addEventListener("click", () => {
-    resultsOverview.open = true;
     for (const file of resultsList.querySelectorAll("details.result-item")) file.open = true;
 });
 btnResultsCollapseAll.addEventListener("click", () => {
     for (const file of resultsList.querySelectorAll("details.result-item")) file.open = false;
-    resultsOverview.open = false;
 });
 const optionCompressImages = document.getElementById("option-compress-images");
 const optionNormalizePages = document.getElementById("option-normalize-pages");
@@ -52,22 +189,21 @@ optionFitBookmarks.addEventListener("change", () => {
 const cropMode = document.getElementById("crop-mode");
 const cropModeHint = document.getElementById("crop-mode-hint");
 const widthMode = document.getElementById("width-mode");
-const widthControls = document.getElementById("width-controls");
 const customWidth = document.getElementById("custom-width");
-const customWidthRow = document.getElementById("custom-width-row");
 const widthModeHint = document.getElementById("width-mode-hint");
+let rememberedCustomWidth = "";
 
 try {
     widthMode.value = localStorage.getItem("widthMode") === "userDefined" ? "userDefined" : "auto";
-    customWidth.value = localStorage.getItem("customWidth") || "";
+    rememberedCustomWidth = localStorage.getItem("customWidth") || "";
 } catch (_) {}
 
 function updateWidthOptions() {
     const isCustom = widthMode.value === "userDefined";
     widthMode.disabled = isProcessing || !optionNormalizePages.checked;
     customWidth.disabled = widthMode.disabled || !isCustom;
-    customWidthRow.classList.toggle("initially-hidden", !isCustom);
-    widthControls.classList.toggle("is-custom", isCustom);
+    customWidth.value = isCustom ? rememberedCustomWidth : "";
+    customWidth.placeholder = isCustom ? "例如 595.28" : "自动识别";
     widthModeHint.textContent = !optionNormalizePages.checked
         ? "开启“统一页面宽度”后，可设置目标宽度。"
         : isCustom
@@ -81,7 +217,8 @@ widthMode.addEventListener("change", () => {
     updateWidthOptions();
 });
 customWidth.addEventListener("input", () => {
-    try { localStorage.setItem("customWidth", customWidth.value); } catch (_) {}
+    rememberedCustomWidth = customWidth.value;
+    try { localStorage.setItem("customWidth", rememberedCustomWidth); } catch (_) {}
 });
 
 function getProcessingOptions() {
@@ -108,6 +245,7 @@ function updateCropModeHint() {
 cropMode.addEventListener("change", updateCropModeHint);
 
 function updateFileList() {
+    fileCount.textContent = selectedFiles.length;
     if (selectedFiles.length === 0) {
         fileList.innerHTML = '<p class="empty-hint">尚未选择任何文件</p>';
         btnProcess.disabled = true;
@@ -122,8 +260,9 @@ function updateFileList() {
         `
             )
             .join("");
-        btnProcess.disabled = false;
+        btnProcess.disabled = isProcessing;
     }
+    if (!isProcessing) setProgress(0, selectedFiles.length ? `已添加 ${selectedFiles.length} 个文件，准备就绪` : "等待添加 PDF 文件");
 }
 
 function escapeHtml(str) {
@@ -144,9 +283,7 @@ function formatBytes(bytes) {
 }
 
 function showMessage(message, type = "error") {
-    resultsSection.style.display = "block";
-    resultsOverview.open = true;
-    resultsOverview.classList.add("is-message");
+    showWorkspace("results");
     resultsControls.hidden = true;
     resultsSummary.textContent = "提示信息";
     resultsList.innerHTML = `<div class="result-message ${type}">
@@ -155,6 +292,7 @@ function showMessage(message, type = "error") {
 }
 
 function addFiles(paths) {
+    if (isProcessing) return;
     for (const p of paths) {
         const trimmed = p.trim();
         if (trimmed && !selectedFiles.includes(trimmed)) {
@@ -162,6 +300,7 @@ function addFiles(paths) {
         }
     }
     updateFileList();
+    showWorkspace("files");
 }
 
 // 选择文件按钮
@@ -178,6 +317,7 @@ btnSelect.addEventListener("click", async () => {
 
 // 手动添加路径
 function addManualPath() {
+    if (isProcessing) return;
     const path = manualPath.value.trim();
     if (!path) {
         return;
@@ -200,6 +340,7 @@ manualPath.addEventListener("keydown", (e) => {
 
 // 移除文件
 fileList.addEventListener("click", (e) => {
+    if (isProcessing) return;
     const btn = e.target.closest(".remove-btn");
     if (btn) {
         const index = parseInt(btn.dataset.index);
@@ -210,14 +351,18 @@ fileList.addEventListener("click", (e) => {
 
 // 清空列表
 btnClear.addEventListener("click", () => {
+    if (isProcessing) return;
     selectedFiles = [];
     updateFileList();
-    resultsSection.style.display = "none";
+    resultsSummary.textContent = "暂无处理结果";
+    resultsList.innerHTML = '<p class="empty-hint">处理完成后，在这里查看文件结果</p>';
+    resultsControls.hidden = true;
+    showWorkspace("files");
 });
 
 // 处理文件
 btnProcess.addEventListener("click", async () => {
-    if (selectedFiles.length === 0) return;
+    if (isProcessing || selectedFiles.length === 0) return;
 
     const options = getProcessingOptions();
     if (options.normalizePages && options.widthMode === "userDefined"
@@ -231,24 +376,27 @@ btnProcess.addEventListener("click", async () => {
     updateWidthOptions();
     btnProcess.disabled = true;
     btnSelect.disabled = true;
+    btnClear.disabled = true;
+    btnAddPath.disabled = true;
+    manualPath.disabled = true;
+    for (const button of fileList.querySelectorAll(".remove-btn")) button.disabled = true;
     optionCompressImages.disabled = true;
     optionNormalizePages.disabled = true;
     cropMode.disabled = true;
     optionRepairPdf.disabled = true;
     optionRepairBookmarks.disabled = true;
     optionFitBookmarks.disabled = true;
-    progressSection.style.display = "block";
-    resultsSection.style.display = "none";
-    progressFill.style.width = "0%";
-    progressFill.style.background = "#00b894";
-    progressText.textContent = `正在处理 ${selectedFiles.length} 个文件...`;
+    showWorkspace("files");
+    resultsSummary.textContent = "处理中，完成后将在此显示结果";
+    resultsList.innerHTML = '<p class="empty-hint">正在处理 PDF，请稍候...</p>';
+    resultsControls.hidden = true;
+    setProgress(0, `正在处理 ${selectedFiles.length} 个文件...`);
 
     try {
         activeOptions = options;
         stopProgressListener = await listen("pdf-progress", (event) => {
             const progress = event.payload || {};
             const percent = Math.round(Math.max(0, Math.min(1, progress.progress || 0)) * 100);
-            progressFill.style.width = `${percent}%`;
 
             const filePart = progress.file_count
                 ? `文件 ${progress.file_index}/${progress.file_count}`
@@ -263,7 +411,7 @@ btnProcess.addEventListener("click", async () => {
             const imagePart = progress.image_count
                 ? ` | 图像 ${progress.image}/${progress.image_count}`
                 : "";
-            progressText.textContent = `${filePart}${namePart}${pagePart}${imagePart} | ${progress.phase || "处理中"} | ${percent}%`;
+            setProgress(percent, `${filePart}${namePart}${pagePart}${imagePart} | ${progress.phase || "处理中"} | ${percent}%`);
         });
 
         const results = await invoke("process_pdfs", {
@@ -271,22 +419,24 @@ btnProcess.addEventListener("click", async () => {
             options: activeOptions,
         });
 
-        progressFill.style.width = "100%";
-        progressText.textContent = "处理完成！";
+        setProgress(100, "处理完成！");
 
         showResults(results);
     } catch (e) {
-        progressText.textContent = `处理出错: ${e}`;
-        progressFill.style.width = "100%";
-        progressFill.style.background = "#d63031";
+        setProgress(100, `处理出错: ${e}`, true);
+        showMessage(`处理出错: ${e}`);
     } finally {
         isProcessing = false;
         if (stopProgressListener) {
             stopProgressListener();
             stopProgressListener = null;
         }
-        btnProcess.disabled = false;
+        btnProcess.disabled = selectedFiles.length === 0;
         btnSelect.disabled = false;
+        btnClear.disabled = false;
+        btnAddPath.disabled = false;
+        manualPath.disabled = false;
+        for (const button of fileList.querySelectorAll(".remove-btn")) button.disabled = false;
         optionCompressImages.disabled = false;
         optionNormalizePages.disabled = false;
         cropMode.disabled = false;
@@ -298,9 +448,7 @@ btnProcess.addEventListener("click", async () => {
 });
 
 function showResults(results) {
-    resultsSection.style.display = "block";
-    resultsOverview.open = false;
-    resultsOverview.classList.remove("is-message");
+    showWorkspace("results");
     resultsControls.hidden = results.length === 0;
     const succeeded = results.filter((result) => result.success).length;
     const failed = results.length - succeeded;
@@ -368,7 +516,7 @@ function showResults(results) {
                 </div>
             </details>
         `;
-    }).join("");
+    }).join("") || '<p class="empty-hint">本批次没有处理结果</p>';
 }
 
 // 初始化

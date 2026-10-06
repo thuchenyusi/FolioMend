@@ -17,144 +17,173 @@
             <span class="local-badge"><span aria-hidden="true"></span>本地处理</span>
         </header>
 
-        <div class="file-section">
-            <div class="file-controls">
-                <button id="btn-select" class="btn btn-primary">选择 PDF 文件</button>
-                <span class="hint">支持选择多个文件，也可直接拖拽文件到窗口</span>
-            </div>
-
-            <div class="file-input-row">
-                <input type="text" id="manual-path" placeholder="或手动输入文件路径，按回车添加..." class="input-path">
-                <button id="btn-add-path" class="btn btn-small">添加</button>
-            </div>
-
-            <div id="file-list" class="file-list">
-                <p class="empty-hint">尚未选择任何文件</p>
-            </div>
-        </div>
-
-        <section class="options-section" aria-labelledby="options-title">
-            <div class="section-heading">
-                <div>
-                    <h2 id="options-title">处理选项</h2>
-                    <p>按需调整，生成适合阅读的 PDF。</p>
+        <main class="workspace">
+            <section class="file-section" aria-label="文件工作区">
+                <div class="file-controls">
+                    <button id="btn-select" class="btn btn-primary">选择 PDF 文件</button>
+                    <span class="hint">支持选择多个文件，也可直接拖拽文件到窗口</span>
                 </div>
-                <span class="section-caption">4 类设置</span>
-            </div>
 
-            <div class="options-grid">
-                <section class="option-category category-pages" aria-labelledby="pages-title">
-                    <div class="category-heading">
-                        <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></span>
-                        <div><h3 id="pages-title">页面与尺寸</h3><p>统一显示宽度，调整可见区域</p></div>
+                <div class="file-input-row">
+                    <input type="text" id="manual-path" placeholder="或手动输入文件路径，按回车添加..." class="input-path">
+                    <button id="btn-add-path" class="btn btn-small">添加</button>
+                </div>
+
+                <div class="workspace-tabs" role="tablist" aria-label="工作区视图">
+                    <button id="tab-files" class="workspace-tab" type="button" role="tab" aria-selected="true" aria-controls="file-list">文件列表 <span id="file-count">0</span></button>
+                    <button id="tab-results" class="workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="results-section" tabindex="-1">处理结果</button>
+                </div>
+                <div class="workspace-panels">
+                    <div id="file-list" class="file-list" role="tabpanel" aria-labelledby="tab-files" tabindex="0">
+                        <p class="empty-hint">尚未选择任何文件</p>
                     </div>
-                    <label class="check-option">
-                        <span><strong>统一页面宽度</strong><small>按可见区域等比缩放，让不同页面保持一致的阅读宽度</small></span>
-                        <input id="option-normalize-pages" type="checkbox" role="switch" checked>
-                    </label>
-                    <div class="page-settings">
-                        <div class="width-options">
-                            <div class="select-option">
-                                <label for="width-mode">目标宽度</label>
-                                <div id="width-controls" class="width-controls">
-                                    <select id="width-mode" aria-describedby="width-mode-hint">
-                                        <option value="auto">自动识别</option>
-                                        <option value="userDefined">自定义</option>
-                                    </select>
-                                    <label id="custom-width-row" class="custom-width-control initially-hidden" for="custom-width">
-                                        <span class="sr-only">自定义宽度（pt）</span>
-                                        <input id="custom-width" type="number" min="0" step="any" placeholder="例如 595.28" title="单位 pt；72 pt = 1 英寸，A4 短边约 595.28 pt" aria-describedby="width-mode-hint" disabled>
-                                        <span class="input-unit" aria-hidden="true">pt</span>
-                                    </label>
+
+                    <section id="results-section" class="results-section" role="tabpanel" aria-labelledby="tab-results" tabindex="0" hidden>
+                        <div class="results-heading">
+                            <h2 id="results-title">处理结果</h2>
+                            <div id="results-controls" class="results-controls" hidden>
+                                <button id="btn-results-expand-all" class="btn btn-small" aria-controls="results-overview">全部展开</button>
+                                <button id="btn-results-collapse-all" class="btn btn-secondary" aria-controls="results-overview">全部收起</button>
+                            </div>
+                        </div>
+                        <div id="results-overview" class="results-overview">
+                            <div class="results-overview-summary">
+                                <span id="results-summary" class="results-count" role="status">暂无处理结果</span>
+                            </div>
+                            <div id="results-list" class="results-list" role="region" aria-label="文件处理结果" tabindex="0">
+                                <p class="empty-hint">处理完成后，在这里查看文件结果</p>
+                            </div>
+                        </div>
+                    </section>
+                </div>
+            </section>
+
+            <section class="options-section" aria-labelledby="options-title">
+                <div class="section-heading">
+                    <div>
+                        <h2 id="options-title">处理选项</h2>
+                        <p>按需调整，生成适合阅读的 PDF。</p>
+                    </div>
+                    <button id="btn-option-help" class="btn btn-small" type="button" aria-expanded="false" aria-controls="options-grid">显示说明</button>
+                </div>
+
+                <div id="options-grid" class="options-grid">
+                    <section class="option-category category-pages" aria-labelledby="pages-title">
+                        <div class="category-heading">
+                            <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></span>
+                            <div><h3 id="pages-title">页面与尺寸</h3><p>统一显示宽度，调整可见区域</p></div>
+                        </div>
+                        <label class="check-option">
+                            <span><strong>统一页面宽度</strong><small>按可见区域等比缩放，让不同页面保持一致的阅读宽度</small></span>
+                            <input id="option-normalize-pages" type="checkbox" role="switch" checked>
+                        </label>
+                        <div class="page-settings">
+                            <div class="width-options">
+                                <div class="select-option">
+                                    <div class="field-label">
+                                        <label for="width-mode">目标宽度</label>
+                                        <button class="info-button" type="button" aria-label="目标宽度说明" aria-expanded="false" aria-controls="width-help" aria-describedby="width-mode-hint"><span aria-hidden="true">i</span></button>
+                                    </div>
+                                    <div id="width-controls" class="width-controls">
+                                        <select id="width-mode" aria-describedby="width-mode-hint">
+                                            <option value="auto">自动识别</option>
+                                            <option value="userDefined">自定义</option>
+                                        </select>
+                                        <label id="custom-width-row" class="custom-width-control" for="custom-width">
+                                            <span class="sr-only">自定义宽度（pt）</span>
+                                            <input id="custom-width" type="number" min="0" step="any" placeholder="自动识别" title="单位 pt；72 pt = 1 英寸，A4 短边约 595.28 pt" aria-describedby="width-mode-hint" disabled>
+                                            <span class="input-unit" aria-hidden="true">pt</span>
+                                        </label>
+                                    </div>
                                 </div>
                             </div>
-                            <p id="width-mode-hint" class="option-hint"></p>
+                            <div class="crop-options">
+                                <div class="select-option">
+                                    <div class="field-label">
+                                        <label for="crop-mode">页面裁剪</label>
+                                        <button class="info-button" type="button" aria-label="页面裁剪说明" aria-expanded="false" aria-controls="crop-help" aria-describedby="crop-mode-hint"><span aria-hidden="true">i</span></button>
+                                    </div>
+                                    <select id="crop-mode" aria-describedby="crop-mode-hint">
+                                        <option value="alignVisible">保留原始页面边界</option>
+                                        <option value="trueCrop">裁剪到可见区域</option>
+                                    </select>
+                                </div>
+                            </div>
                         </div>
-                        <div class="crop-options">
-                            <label class="select-option" for="crop-mode">
-                                <span>页面裁剪</span>
-                                <select id="crop-mode" aria-describedby="crop-mode-hint">
-                                    <option value="alignVisible">保留原始页面边界</option>
-                                    <option value="trueCrop">裁剪到可见区域</option>
-                                </select>
-                            </label>
-                            <p id="crop-mode-hint" class="option-hint"></p>
+                    </section>
+
+                    <section class="option-category category-images" aria-labelledby="images-title">
+                        <div class="category-heading">
+                            <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m21 16-5-5-7 9M3 16l4-4 4 4"/></svg></span>
+                            <div><h3 id="images-title">图像优化</h3><p>减小体积，保留扫描内容</p></div>
                         </div>
-                    </div>
-                </section>
-
-                <section class="option-category category-images" aria-labelledby="images-title">
-                    <div class="category-heading">
-                        <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8" cy="9" r="1.5"/><path d="m21 16-5-5-7 9M3 16l4-4 4 4"/></svg></span>
-                        <div><h3 id="images-title">图像优化</h3><p>减小体积，保留扫描内容</p></div>
-                    </div>
-                    <label class="check-option">
-                        <span><strong>压缩扫描图像</strong><small>自动识别彩色、灰度和黑白，选择合适的压缩方式</small></span>
-                        <input id="option-compress-images" type="checkbox" role="switch" checked>
-                    </label>
-                </section>
-
-                <section class="option-category category-repair" aria-labelledby="repair-title">
-                    <div class="category-heading">
-                        <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg></span>
-                        <div><h3 id="repair-title">文档修复</h3><p>处理无法正常读取的 PDF</p></div>
-                    </div>
-                    <label class="check-option">
-                        <span><strong>自动修复 PDF 索引</strong><small>读取失败时尝试修复，成功后另存为新的 PDF</small></span>
-                        <input id="option-repair-pdf" type="checkbox" role="switch" checked>
-                    </label>
-                </section>
-
-                <section class="option-category category-bookmarks" aria-labelledby="bookmarks-title">
-                    <div class="category-heading">
-                        <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-4-6 4V4Z"/></svg></span>
-                        <div><h3 id="bookmarks-title">书签与导航</h3><p>保留目录结构，优化跳转体验</p></div>
-                    </div>
-                    <div class="bookmark-options">
                         <label class="check-option">
-                            <span><strong>检测与修复异常书签</strong><small>优先保留并修复结构；如需清理现有书签，会先确认</small></span>
-                            <input id="option-repair-bookmarks" type="checkbox" role="switch" checked>
+                            <span><strong>压缩扫描图像</strong><small>自动识别彩色、灰度和黑白，选择合适的压缩方式</small></span>
+                            <input id="option-compress-images" type="checkbox" role="switch" checked>
                         </label>
-                        <label class="check-option">
-                            <span><strong>跳转时适合页面宽度</strong><small>保留标题、层级与纵向位置，外部链接不受影响</small></span>
-                            <input id="option-fit-bookmarks" type="checkbox" role="switch">
-                        </label>
-                    </div>
-                </section>
-            </div>
-        </section>
+                    </section>
 
-        <div id="progress-section" class="progress-section initially-hidden">
-            <div class="progress-bar">
-                <div id="progress-fill" class="progress-fill"></div>
-            </div>
-            <p id="progress-text" class="progress-text">处理中...</p>
-        </div>
+                    <section class="option-category category-repair" aria-labelledby="repair-title">
+                        <div class="category-heading">
+                            <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg></span>
+                            <div><h3 id="repair-title">文档修复</h3><p>处理无法正常读取的 PDF</p></div>
+                        </div>
+                        <div class="check-option">
+                            <span>
+                                <span class="option-title">
+                                    <label for="option-repair-pdf"><strong>自动修复 PDF 索引</strong></label>
+                                    <button class="info-button" type="button" aria-label="PDF 索引修复说明" aria-expanded="false" aria-controls="pdf-repair-help" aria-describedby="pdf-repair-hint"><span aria-hidden="true">i</span></button>
+                                </span>
+                                <small id="pdf-repair-description">读取失败时尝试修复，输出副本并保留原文件</small>
+                            </span>
+                            <input id="option-repair-pdf" type="checkbox" role="switch" aria-describedby="pdf-repair-description" checked>
+                        </div>
+                    </section>
 
-        <section id="results-section" class="results-section initially-hidden" aria-labelledby="results-title">
-            <div class="results-heading">
-                <h2 id="results-title">处理结果</h2>
-                <div id="results-controls" class="results-controls" hidden>
-                    <button id="btn-results-expand-all" class="btn btn-small" aria-controls="results-overview">全部展开</button>
-                    <button id="btn-results-collapse-all" class="btn btn-secondary" aria-controls="results-overview">全部收起</button>
+                    <section class="option-category category-bookmarks" aria-labelledby="bookmarks-title">
+                        <div class="category-heading">
+                            <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-4-6 4V4Z"/></svg></span>
+                            <div><h3 id="bookmarks-title">书签与导航</h3><p>保留目录结构，优化跳转体验</p></div>
+                        </div>
+                        <div class="bookmark-options">
+                            <div class="check-option">
+                                <span>
+                                    <span class="option-title">
+                                        <label for="option-repair-bookmarks"><strong>检测与修复异常书签</strong></label>
+                                        <button class="info-button" type="button" aria-label="异常书签修复说明" aria-expanded="false" aria-controls="bookmark-repair-help" aria-describedby="bookmark-repair-hint"><span aria-hidden="true">i</span></button>
+                                    </span>
+                                    <small id="bookmark-repair-description">优先修复结构，尽量保留现有书签</small>
+                                </span>
+                                <input id="option-repair-bookmarks" type="checkbox" role="switch" aria-describedby="bookmark-repair-description bookmark-cleanup-note" checked>
+                            </div>
+                            <p id="bookmark-cleanup-note" class="consequence-note">如需清理现有书签，会先确认。</p>
+                            <div class="check-option">
+                                <span>
+                                    <span class="option-title">
+                                        <label for="option-fit-bookmarks"><strong>跳转时适合页面宽度</strong></label>
+                                        <button class="info-button" type="button" aria-label="书签跳转显示说明" aria-expanded="false" aria-controls="bookmark-fit-help" aria-describedby="bookmark-fit-hint"><span aria-hidden="true">i</span></button>
+                                    </span>
+                                    <small id="bookmark-fit-description">保留标题、层级与纵向位置，外部链接不受影响</small>
+                                </span>
+                                <input id="option-fit-bookmarks" type="checkbox" role="switch" aria-describedby="bookmark-fit-description">
+                            </div>
+                        </div>
+                    </section>
                 </div>
-            </div>
-            <details id="results-overview" class="results-overview">
-                <summary class="results-overview-summary">
-                    <span id="results-summary" class="results-count">暂无处理结果</span>
-                    <span class="results-fold-label">
-                        <span class="fold-closed">展开文件列表</span>
-                        <span class="fold-open">收起文件列表</span>
-                    </span>
-                </summary>
-                <div id="results-list" class="results-list"></div>
-            </details>
-        </section>
+            </section>
+
+        </main>
     </div>
 
     <footer class="action-section">
         <div class="action-inner">
             <p class="output-note">输出至原文件目录<span>另存副本，保留原文件</span></p>
+            <div id="progress-section" class="progress-section">
+                <div id="progress-bar" class="progress-bar" role="progressbar" aria-label="批次处理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                    <div id="progress-fill" class="progress-fill"></div>
+                </div>
+                <p id="progress-text" class="progress-text" role="status">等待添加 PDF 文件</p>
+            </div>
             <div class="action-buttons">
                 <button id="btn-clear" class="btn btn-secondary">清空列表</button>
                 <button id="btn-process" class="btn btn-success" disabled>开始处理 <span aria-hidden="true">→</span></button>
@@ -164,6 +193,32 @@
 
     <div id="drop-overlay" class="drop-overlay initially-hidden">
         <div class="drop-message">松开以添加 PDF 文件</div>
+    </div>
+
+    <div id="width-help" class="info-popover" popover="manual" role="tooltip">
+        <h3>目标宽度</h3>
+        <p id="width-mode-hint"></p>
+        <p>自定义宽度单位为 pt：72 pt = 1 英寸，A4 短边约 595.28 pt。</p>
+    </div>
+    <div id="crop-help" class="info-popover" popover="manual" role="tooltip">
+        <h3>页面裁剪</h3>
+        <p id="crop-mode-hint"></p>
+        <p>裁剪以 PDF 当前的可见区域为准，不会自动识别并去除扫描图像中的白边。</p>
+    </div>
+    <div id="pdf-repair-help" class="info-popover" popover="manual" role="tooltip">
+        <h3>PDF 索引修复</h3>
+        <p id="pdf-repair-hint">PDF 无法正常读取时，尝试重建索引后继续处理。修复成功会输出新副本，原文件保留。</p>
+        <p>修复失败会将该文件标记为失败，并继续处理其他文件。</p>
+    </div>
+    <div id="bookmark-repair-help" class="info-popover" popover="manual" role="tooltip">
+        <h3>异常书签修复</h3>
+        <p id="bookmark-repair-hint">检测并优先修复异常结构，尽量保留书签标题、层级和跳转目标。</p>
+        <p>如果无法修复且需要清理现有书签，会先询问。选择清理会移除输出副本中的全部书签；选择保留会继续其他处理。原文件保留。</p>
+    </div>
+    <div id="bookmark-fit-help" class="info-popover" popover="manual" role="tooltip">
+        <h3>书签跳转显示</h3>
+        <p id="bookmark-fit-hint">将文档内书签的跳转显示方式改为适合页面宽度，保留标题、层级与纵向位置。</p>
+        <p>外部链接不受影响；无法解析的跳转目标会跳过。</p>
     </div>
 
     <script type="module" src="main.js"></script>

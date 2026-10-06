@@ -14,8 +14,12 @@
     "windows": [
       {
         "title": "FolioMend",
-        "width": 900,
-        "height": 650,
+        "width": 1180,
+        "height": 780,
+        "minWidth": 640,
+        "minHeight": 600,
+        "center": true,
+        "preventOverflow": true,
         "resizable": true,
         "fullscreen": false
       }
