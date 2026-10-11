@@ -78,16 +78,6 @@ GPU 负责灰度转换、纯黑白位打包和灰度图的三角滤波缩小；�
 cargo test --locked --manifest-path src-tauri/Cargo.toml hardware_ -- --ignored --nocapture
 ```
 
-### CPU / GPU 完整流程对比
-
-通用测试程序会对用户指定的 PDF 预热后交替测量 CPU / GPU，输出仅保存在本机。运行示例：
-
-```powershell
-cargo run --locked --release --manifest-path src-tauri/Cargo.toml --example benchmark -- input.pdf tmp/benchmark/report.json 3
-```
-
-输入文件由使用者自行提供。报告包含本地路径、压缩参数和运行数据，应保存在已忽略的 `tmp/` 或 `benchmarks/` 目录；实际 PDF 和测试记录不纳入仓库。比较范围为 GPU 预处理，JPEG / Flate 编码及 PDF 输出仍使用 CPU。
-
 ## 开发环境
 
 - [Node.js](https://nodejs.org/) 22.12 或更高版本
