@@ -23,6 +23,8 @@ tauri-plugin-dialog = "2"
 lopdf = "0.34"
 flate2 = "1.1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+wgpu = { version = "26", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }
+pollster = "0.4"
 
 [profile.dev]
 opt-level = 1

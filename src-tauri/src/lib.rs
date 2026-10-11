@@ -1,4 +1,5 @@
 mod bookmark_repair;
+mod gpu_images;
 mod pdf_processor;
 mod pdf_repair;
 
@@ -112,6 +113,11 @@ async fn process_pdfs(
                         monochrome_images: 0,
                         optimized_images: 0,
                         skipped_images: 0,
+                        gpu_images: 0,
+                        cpu_images: 0,
+                        image_acceleration: "未完成检测".to_string(),
+                        image_statistics: None,
+                        image_settings: None,
                         original_bytes: 0,
                         output_bytes: 0,
                         pdf_repair_status: "未完成检测".to_string(),
@@ -158,6 +164,11 @@ async fn process_pdfs(
             monochrome_images: 0,
             optimized_images: 0,
             skipped_images: 0,
+                        gpu_images: 0,
+                        cpu_images: 0,
+                        image_acceleration: "未完成检测".to_string(),
+            image_statistics: None,
+            image_settings: None,
             original_bytes: 0,
             output_bytes: 0,
             pdf_repair_status: "未完成检测".to_string(),

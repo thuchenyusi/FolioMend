@@ -1,3 +1,4 @@
+use crate::gpu_images::{self, ImageRequest};
 use flate2::read::ZlibDecoder;
 use image::codecs::jpeg::JpegEncoder;
 use image::ExtendedColorType;
@@ -19,6 +20,11 @@ pub struct ProcessResult {
     pub monochrome_images: usize,
     pub optimized_images: usize,
     pub skipped_images: usize,
+    pub gpu_images: usize,
+    pub cpu_images: usize,
+    pub image_acceleration: String,
+    pub image_statistics: Option<ImageStatistics>,
+    pub image_settings: Option<ImageCompressionOptions>,
     pub original_bytes: u64,
     pub output_bytes: u64,
     pub pdf_repair_status: String,
@@ -40,23 +46,83 @@ pub struct ProcessingProgress {
     pub progress: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CropBoxMode {
     AlignVisible,
     TrueCrop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WidthMode {
     Auto,
     UserDefined,
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ColorReduction {
+    Preserve,
+    Mild,
+    Aggressive,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ImageCompressionOptions {
+    pub gpu_acceleration: bool,
+    pub jpeg_enabled: bool,
+    pub jpeg_quality: u8,
+    pub downsample: bool,
+    pub max_long_edge: u32,
+    pub allow_color_to_gray: bool,
+    pub color_difference: u8,
+    pub color_pixel_percent: f32,
+    pub grayscale_reduction: ColorReduction,
+    pub color_reduction: ColorReduction,
+}
+
+impl Default for ImageCompressionOptions {
+    fn default() -> Self {
+        Self {
+            gpu_acceleration: true,
+            jpeg_enabled: true,
+            jpeg_quality: 80,
+            downsample: true,
+            max_long_edge: 2000,
+            allow_color_to_gray: false,
+            color_difference: 20,
+            color_pixel_percent: 5.0,
+            grayscale_reduction: ColorReduction::Preserve,
+            color_reduction: ColorReduction::Preserve,
+        }
+    }
+}
+
+impl ImageCompressionOptions {
+    fn validate(self) -> Result<(), String> {
+        if self.jpeg_enabled && !(1..=100).contains(&self.jpeg_quality) {
+            return Err("JPEG 质量请输入 1–100 的整数。".into());
+        }
+        if self.downsample && !(256..=20000).contains(&self.max_long_edge) {
+            return Err("图像长边请输入 256–20000 的整数像素。".into());
+        }
+        if self.allow_color_to_gray
+            && (!(1..=255).contains(&self.color_difference)
+                || !self.color_pixel_percent.is_finite()
+                || !(0.0..=100.0).contains(&self.color_pixel_percent))
+        {
+            return Err("彩色转灰度阈值无效：RGB 差异为 1–255，彩色像素比例为 0–100%。".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProcessOptions {
+    pub image_compression: ImageCompressionOptions,
     pub compress_images: bool,
     pub normalize_pages: bool,
     pub width_mode: WidthMode,
@@ -70,6 +136,7 @@ pub struct ProcessOptions {
 impl Default for ProcessOptions {
     fn default() -> Self {
         Self {
+            image_compression: ImageCompressionOptions::default(),
             compress_images: true,
             normalize_pages: true,
             width_mode: WidthMode::Auto,
@@ -84,6 +151,9 @@ impl Default for ProcessOptions {
 
 impl ProcessOptions {
     fn validate(self) -> Result<(), String> {
+        if self.compress_images {
+            self.image_compression.validate()?;
+        }
         if self.normalize_pages && self.width_mode == WidthMode::UserDefined {
             match self.custom_width {
                 Some(width) if width.is_finite() && width > 0.0 => {}
@@ -94,13 +164,80 @@ impl ProcessOptions {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ImageStatistics {
+    pub total_images: usize,
+    pub original_image_bytes: u64,
+    pub output_image_bytes: u64,
+    pub original_pixels: u64,
+    pub output_pixels: u64,
+    pub color_converted_images: usize,
+    pub binarized_images: usize,
+    pub quantized_images: usize,
+    pub downsampled_images: usize,
+    pub jpeg_images: usize,
+    pub flate_images: usize,
+    pub unsupported_images: usize,
+    pub protected_images: usize,
+    pub encoding_failed_images: usize,
+    pub insufficient_savings_images: usize,
+    pub discarded_images: usize,
+    pub changes: Vec<ImageChange>,
+}
+
+impl ImageStatistics {
+    fn discard_changes(&mut self) {
+        self.discarded_images += self.changes.len();
+        self.changes.clear();
+        self.output_image_bytes = self.original_image_bytes;
+        self.output_pixels = self.original_pixels;
+        self.color_converted_images = 0;
+        self.binarized_images = 0;
+        self.quantized_images = 0;
+        self.downsampled_images = 0;
+        self.jpeg_images = 0;
+        self.flate_images = 0;
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ImageChange {
+    pub object_id: ObjectId,
+    pub original_width: u32,
+    pub original_height: u32,
+    pub width: u32,
+    pub height: u32,
+    pub original_bytes: u64,
+    pub output_bytes: u64,
+    pub original_bits_per_pixel: u8,
+    pub bits_per_pixel: u8,
+    pub color_converted: bool,
+    pub binarized: bool,
+    pub quantized: bool,
+    pub downsampled: bool,
+    pub encoding: String,
+    pub sampled_colors_before: usize,
+    pub sampled_colors_after: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ImageRetentionReason {
+    Unsupported,
+    Protected,
+    EncodingFailed,
+    InsufficientSavings,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct ImageOptimizationSummary {
+    pub statistics: ImageStatistics,
     pub color_images: usize,
     pub grayscale_images: usize,
     pub monochrome_images: usize,
     pub optimized_images: usize,
     pub skipped_images: usize,
+    pub gpu_images: usize,
+    pub cpu_images: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,14 +258,20 @@ struct DecodedImage {
 #[derive(Debug)]
 struct ImageTransform {
     stream: Stream,
+    used_gpu: bool,
+    change: ImageChange,
 }
 
 #[derive(Debug)]
 struct ImageWorkResult {
+    original_bytes: u64,
+    original_pixels: u64,
+    retention_reason: Option<ImageRetentionReason>,
     image_id: ObjectId,
     kind: Option<ImageKind>,
     transform: Option<ImageTransform>,
     skipped: bool,
+    used_gpu: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -185,8 +328,6 @@ struct PageTransform {
 const COLOR_DIFFERENCE_THRESHOLD: u8 = 10;
 const MONOCHROME_MID_TONE_RATIO: f32 = 0.02;
 const MIN_SAVING_RATIO: f32 = 0.02;
-const EBOOK_MAX_LONG_EDGE: u32 = 2000;
-const GRAYSCALE_JPEG_QUALITY: u8 = 60;
 
 fn resolve_array<'a>(doc: &'a Document, obj: &'a Object) -> Option<Vec<Object>> {
     match obj {
@@ -612,7 +753,7 @@ fn decode_image(doc: &Document, stream: &Stream) -> Option<DecodedImage> {
     None
 }
 
-fn classify_image(image: &DecodedImage) -> (ImageKind, Vec<u8>) {
+fn classify_image(image: &DecodedImage) -> ImageKind {
     let pixel_count = (image.width as usize).saturating_mul(image.height as usize);
     let sample_step = (pixel_count / 50_000).max(1);
     let mut samples = 0usize;
@@ -642,10 +783,10 @@ fn classify_image(image: &DecodedImage) -> (ImageKind, Vec<u8>) {
     }
 
     if samples == 0 {
-        return (ImageKind::Grayscale, Vec::new());
+        return ImageKind::Grayscale;
     }
     if colored as f32 / samples as f32 > 0.005 {
-        return (ImageKind::Color, Vec::new());
+        return ImageKind::Color;
     }
 
     let kind = if mid_tones as f32 / samples as f32 <= MONOCHROME_MID_TONE_RATIO {
@@ -654,8 +795,12 @@ fn classify_image(image: &DecodedImage) -> (ImageKind, Vec<u8>) {
         ImageKind::Grayscale
     };
 
-    // Only neutral images need a complete grayscale plane for re-encoding.
-    let gray = if image.channels == 1 {
+    kind
+}
+
+fn grayscale_plane(image: &DecodedImage) -> Vec<u8> {
+    let pixel_count = image.width as usize * image.height as usize;
+    if image.channels == 1 {
         image.pixels[..pixel_count].to_vec()
     } else {
         let mut gray = Vec::with_capacity(pixel_count);
@@ -666,8 +811,7 @@ fn classify_image(image: &DecodedImage) -> (ImageKind, Vec<u8>) {
             );
         }
         gray
-    };
-    (kind, gray)
+    }
 }
 
 fn pack_monochrome(gray: &[u8], width: u32) -> Vec<u8> {
@@ -694,25 +838,44 @@ fn compress_flate(data: &[u8]) -> Option<Vec<u8>> {
     encoder.finish().ok()
 }
 
-fn gray_jpeg(gray: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+fn encode_jpeg(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    channels: u8,
+    quality: u8,
+) -> Option<Vec<u8>> {
     let mut output = Vec::new();
-    let mut encoder =
-        JpegEncoder::new_with_quality(Cursor::new(&mut output), GRAYSCALE_JPEG_QUALITY);
+    let mut encoder = JpegEncoder::new_with_quality(Cursor::new(&mut output), quality);
     encoder
-        .encode(gray, width, height, ExtendedColorType::L8)
+        .encode(
+            pixels,
+            width,
+            height,
+            if channels == 3 {
+                ExtendedColorType::Rgb8
+            } else {
+                ExtendedColorType::L8
+            },
+        )
         .ok()?;
     Some(output)
 }
 
-fn downsample_gray(gray: Vec<u8>, width: u32, height: u32) -> Option<(Vec<u8>, u32, u32)> {
+fn downsample_gray(
+    gray: Vec<u8>,
+    width: u32,
+    height: u32,
+    max_edge: Option<u32>,
+) -> Option<(Vec<u8>, u32, u32)> {
     let long_edge = width.max(height);
-    if long_edge <= EBOOK_MAX_LONG_EDGE {
+    let Some(max_edge) = max_edge.filter(|edge| long_edge > *edge) else {
         return Some((gray, width, height));
-    }
+    };
 
-    let scale = EBOOK_MAX_LONG_EDGE as f32 / long_edge as f32;
-    let target_width = ((width as f32 * scale).round() as u32).max(1);
-    let target_height = ((height as f32 * scale).round() as u32).max(1);
+    let scale = max_edge as f64 / long_edge as f64;
+    let target_width = ((width as f64 * scale).round() as u32).max(1);
+    let target_height = ((height as f64 * scale).round() as u32).max(1);
     let source = image::GrayImage::from_raw(width, height, gray)?;
     let resized = image::imageops::resize(
         &source,
@@ -723,54 +886,286 @@ fn downsample_gray(gray: Vec<u8>, width: u32, height: u32) -> Option<(Vec<u8>, u
     Some((resized.into_raw(), target_width, target_height))
 }
 
+fn target_image_size(image: &DecodedImage, max_edge: Option<u32>) -> (u32, u32) {
+    match max_edge.filter(|edge| image.width.max(image.height) > *edge) {
+        Some(edge) => {
+            let scale = edge as f64 / image.width.max(image.height) as f64;
+            (
+                (image.width as f64 * scale).round().max(1.0) as u32,
+                (image.height as f64 * scale).round().max(1.0) as u32,
+            )
+        }
+        None => (image.width, image.height),
+    }
+}
+
+fn prepare_image(
+    image: &DecodedImage,
+    kind: ImageKind,
+    max_edge: Option<u32>,
+    try_gpu: impl FnOnce(ImageRequest<'_>) -> Option<Vec<u8>>,
+) -> Option<(Vec<u8>, u32, u32, bool)> {
+    let (width, height) = target_image_size(image, max_edge);
+    let resized = (width, height) != (image.width, image.height);
+    // The GPU's packed monochrome kernel works at source dimensions. When shrinking
+    // a binary image, resize its gray plane first, then pack the resulting pixels.
+    let gpu_packed = kind == ImageKind::Monochrome && !resized;
+    if let Some(mut bytes) = try_gpu(ImageRequest {
+        pixels: &image.pixels,
+        width: image.width,
+        height: image.height,
+        channels: image.channels,
+        target_width: width,
+        target_height: height,
+        monochrome: gpu_packed,
+    }) {
+        if kind == ImageKind::Monochrome && !gpu_packed {
+            bytes = pack_monochrome(&bytes, width);
+        }
+        return Some((bytes, width, height, true));
+    }
+    let (gray, width, height) =
+        downsample_gray(grayscale_plane(image), image.width, image.height, max_edge)?;
+    let bytes = if kind == ImageKind::Monochrome {
+        pack_monochrome(&gray, width)
+    } else {
+        gray
+    };
+    Some((bytes, width, height, false))
+}
+
+fn colored_pixel_ratio(image: &DecodedImage, difference: u8) -> f32 {
+    if image.channels != 3 {
+        return 0.0;
+    }
+    let count = image.width as usize * image.height as usize;
+    let step = (count / 50_000).max(1);
+    let mut samples = 0usize;
+    let mut colored = 0usize;
+    for index in (0..count).step_by(step) {
+        let pixel = &image.pixels[index * 3..index * 3 + 3];
+        if pixel.iter().max().unwrap() - pixel.iter().min().unwrap() > difference {
+            colored += 1;
+        }
+        samples += 1;
+    }
+    colored as f32 / samples.max(1) as f32
+}
+
+fn reduce_levels(pixels: &mut [u8], levels: u16) -> bool {
+    let mut changed = false;
+    for value in pixels {
+        let level = (u16::from(*value) * (levels - 1) + 127) / 255;
+        let reduced = ((level * 255 + (levels - 1) / 2) / (levels - 1)) as u8;
+        changed |= *value != reduced;
+        *value = reduced;
+    }
+    changed
+}
+
+// Bound diagnostics independently of scan resolution: this measures sampled colors,
+// not the exact palette of the whole image or of a decoded JPEG output.
+fn sampled_color_count(pixels: &[u8], channels: u8) -> usize {
+    let count = pixels.len() / channels as usize;
+    let step = count.div_ceil(50_000).max(1);
+    let mut colors = std::collections::HashSet::new();
+    for pixel in pixels.chunks_exact(channels as usize).step_by(step) {
+        let color = if channels == 3 {
+            (u32::from(pixel[0]) << 16) | (u32::from(pixel[1]) << 8) | u32::from(pixel[2])
+        } else {
+            u32::from(pixel[0])
+        };
+        colors.insert(color);
+    }
+    colors.len()
+}
+
+fn image_is_protected(stream: &Stream) -> bool {
+    stream.dict.get(b"SMask").is_ok()
+        || stream.dict.get(b"Mask").is_ok()
+        || has_non_default_decode(stream)
+        || stream
+            .dict
+            .get(b"ImageMask")
+            .and_then(Object::as_bool)
+            .unwrap_or(false)
+}
+
+fn stream_pixel_count(stream: &Stream) -> u64 {
+    let dimension = |key: &[u8]| {
+        stream
+            .dict
+            .get(key)
+            .and_then(Object::as_i64)
+            .ok()
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(0)
+    };
+    dimension(b"Width").saturating_mul(dimension(b"Height"))
+}
+
 fn transformed_stream(
     original: &Stream,
     image: &DecodedImage,
     kind: ImageKind,
-    gray: Vec<u8>,
-) -> Option<Stream> {
-    // Do not discard transparency or soft masks while reducing colors.
-    if original.dict.get(b"SMask").is_ok() || original.dict.get(b"Mask").is_ok() {
+    options: ImageCompressionOptions,
+) -> Option<ImageTransform> {
+    // Do not change images whose pixel interpretation or transparency needs extra handling.
+    if image_is_protected(original) {
         return None;
     }
-
-    let (content, filter, bits, output_width, output_height) = match kind {
-        ImageKind::Color => return None,
-        ImageKind::Monochrome => (
-            compress_flate(&pack_monochrome(&gray, image.width))?,
-            "FlateDecode",
-            1,
-            image.width,
-            image.height,
-        ),
-        ImageKind::Grayscale => {
-            let (gray, width, height) = downsample_gray(gray, image.width, image.height)?;
-            if image_filter_names(original)
-                .iter()
-                .any(|f| f == "DCTDecode")
-            {
-                (
-                    gray_jpeg(&gray, width, height)?,
-                    "DCTDecode",
-                    8,
-                    width,
-                    height,
-                )
+    let max_edge = options.downsample.then_some(options.max_long_edge);
+    // Classification tolerates a few colored pixels, but disabling conversion must
+    // also protect faint color marks in otherwise neutral RGB scans.
+    let has_color =
+        kind == ImageKind::Color || (image.channels == 3 && colored_pixel_ratio(image, 0) > 0.0);
+    let keep_color = has_color
+        && !(options.allow_color_to_gray
+            && colored_pixel_ratio(image, options.color_difference) * 100.0
+                <= options.color_pixel_percent);
+    let source_binary = original
+        .dict
+        .get(b"BitsPerComponent")
+        .and_then(Object::as_i64)
+        .ok()
+        == Some(1);
+    let binary = !keep_color
+        && match options.grayscale_reduction {
+            ColorReduction::Preserve => source_binary,
+            ColorReduction::Mild => kind == ImageKind::Monochrome,
+            ColorReduction::Aggressive => true,
+        };
+    let (mut pixels, width, height, used_gpu, channels) = if keep_color {
+        let (width, height) = target_image_size(image, max_edge);
+        let rgb = image::RgbImage::from_raw(image.width, image.height, image.pixels.clone())?;
+        let bytes = if (width, height) == (image.width, image.height) {
+            rgb.into_raw()
+        } else {
+            image::imageops::resize(&rgb, width, height, image::imageops::FilterType::Triangle)
+                .into_raw()
+        };
+        (bytes, width, height, false, 3)
+    } else {
+        let preparation = if binary && !options.jpeg_enabled {
+            ImageKind::Monochrome
+        } else {
+            ImageKind::Grayscale
+        };
+        let (bytes, width, height, gpu) = prepare_image(image, preparation, max_edge, |request| {
+            if options.gpu_acceleration {
+                gpu_images::preprocess(request)
             } else {
-                (compress_flate(&gray)?, "FlateDecode", 8, width, height)
+                None
+            }
+        })?;
+        (bytes, width, height, gpu, 1)
+    };
+    let quantized = if keep_color {
+        match options.color_reduction {
+            ColorReduction::Preserve => false,
+            ColorReduction::Mild => reduce_levels(&mut pixels, 32),
+            ColorReduction::Aggressive => reduce_levels(&mut pixels, 8),
+        }
+    } else if binary && options.jpeg_enabled {
+        for value in &mut pixels {
+            *value = if *value >= 160 { 255 } else { 0 };
+        }
+        false
+    } else if !binary && options.grayscale_reduction == ColorReduction::Mild {
+        reduce_levels(&mut pixels, 32)
+    } else {
+        false
+    };
+    let sampled_colors_after = if binary && !options.jpeg_enabled {
+        // Packed rows include padding bits; inspect actual pixels only.
+        let row_bytes = width.div_ceil(8) as usize;
+        let count = width as usize * height as usize;
+        let step = count.div_ceil(50_000).max(1);
+        let mut black = false;
+        let mut white = false;
+        for index in (0..count).step_by(step) {
+            let byte = pixels[index / width as usize * row_bytes + (index % width as usize) / 8];
+            if byte & (1 << (7 - index % width as usize % 8)) == 0 {
+                black = true;
+            } else {
+                white = true;
             }
         }
+        usize::from(black) + usize::from(white)
+    } else {
+        sampled_color_count(&pixels, channels)
     };
-
+    let (content, filter, bits) = if options.jpeg_enabled {
+        let jpeg = encode_jpeg(&pixels, width, height, channels, options.jpeg_quality)?;
+        if binary {
+            // Lossless 1-bit Flate often beats JPEG for text; keep the smaller candidate.
+            let flate = compress_flate(&pack_monochrome(&pixels, width))?;
+            if flate.len() < jpeg.len() {
+                (flate, "FlateDecode", 1)
+            } else {
+                (jpeg, "DCTDecode", 8)
+            }
+        } else {
+            (jpeg, "DCTDecode", 8)
+        }
+    } else {
+        (
+            compress_flate(&pixels)?,
+            "FlateDecode",
+            if binary { 1 } else { 8 },
+        )
+    };
     let mut dict = original.dict.clone();
-    dict.set("Width", output_width as i64);
-    dict.set("Height", output_height as i64);
-    dict.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+    dict.set("Width", width as i64);
+    dict.set("Height", height as i64);
+    dict.set(
+        "ColorSpace",
+        Object::Name(if keep_color {
+            b"DeviceRGB".to_vec()
+        } else {
+            b"DeviceGray".to_vec()
+        }),
+    );
     dict.set("BitsPerComponent", bits as i64);
     dict.set("Filter", Object::Name(filter.as_bytes().to_vec()));
     dict.remove(b"Decode");
     dict.remove(b"DecodeParms");
-    Some(Stream::new(dict, content))
+    let source_bits = original
+        .dict
+        .get(b"BitsPerComponent")
+        .and_then(Object::as_i64)
+        .ok()
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(8);
+    let source_channels =
+        if image_color_space(&Document::new(), original).as_deref() == Some(b"DeviceGray") {
+            1
+        } else {
+            image.channels
+        };
+    let change = ImageChange {
+        object_id: (0, 0),
+        original_width: image.width,
+        original_height: image.height,
+        width,
+        height,
+        original_bytes: original.content.len() as u64,
+        output_bytes: content.len() as u64,
+        original_bits_per_pixel: source_bits.saturating_mul(source_channels),
+        bits_per_pixel: bits as u8 * channels,
+        color_converted: has_color && !keep_color,
+        binarized: binary && !source_binary,
+        quantized,
+        downsampled: (width, height) != (image.width, image.height),
+        encoding: filter.to_string(),
+        sampled_colors_before: sampled_color_count(&image.pixels, image.channels),
+        sampled_colors_after,
+    };
+    Some(ImageTransform {
+        stream: Stream::new(dict, content),
+        used_gpu,
+        change,
+    })
 }
 
 fn collect_images_from_resources(
@@ -845,48 +1240,74 @@ fn referenced_image_ids(doc: &Document, page_ids: &[ObjectId]) -> Vec<ObjectId> 
     image_ids.into_iter().collect()
 }
 
-fn process_image(doc: &Document, image_id: ObjectId) -> ImageWorkResult {
-    let Ok(stream) = doc.get_object(image_id).and_then(Object::as_stream) else {
-        return ImageWorkResult {
-            image_id,
-            kind: None,
-            transform: None,
-            skipped: true,
-        };
-    };
-    let Some(image) = decode_image(doc, stream) else {
-        return ImageWorkResult {
-            image_id,
-            kind: None,
-            transform: None,
-            skipped: true,
-        };
-    };
-
-    let (kind, gray) = classify_image(&image);
-    let transform = transformed_stream(stream, &image, kind, gray).and_then(|transformed| {
-        ((transformed.content.len() as f32)
-            < (stream.content.len() as f32 * (1.0 - MIN_SAVING_RATIO)))
-            .then_some(ImageTransform {
-                stream: transformed,
-            })
-    });
-    ImageWorkResult {
+fn process_image(
+    doc: &Document,
+    image_id: ObjectId,
+    options: ImageCompressionOptions,
+) -> ImageWorkResult {
+    let mut result = ImageWorkResult {
         image_id,
-        kind: Some(kind),
-        transform,
-        skipped: false,
+        kind: None,
+        transform: None,
+        skipped: true,
+        used_gpu: None,
+        original_bytes: 0,
+        original_pixels: 0,
+        retention_reason: Some(ImageRetentionReason::Unsupported),
+    };
+    let Ok(stream) = doc.get_object(image_id).and_then(Object::as_stream) else {
+        return result;
+    };
+    result.original_bytes = stream.content.len() as u64;
+    result.original_pixels = stream_pixel_count(stream);
+    // This distinction must happen before decoding: predictors and masks otherwise
+    // look indistinguishable from an unsupported codec in the result report.
+    if image_is_protected(stream) {
+        result.retention_reason = Some(ImageRetentionReason::Protected);
+        return result;
     }
+    let Some(image) = decode_image(doc, stream) else {
+        return result;
+    };
+    result.kind = Some(classify_image(&image));
+    let Some(mut prepared) = transformed_stream(stream, &image, result.kind.unwrap(), options)
+    else {
+        result.retention_reason = Some(ImageRetentionReason::EncodingFailed);
+        return result;
+    };
+    prepared.change.object_id = image_id;
+    if image_color_space(doc, stream).as_deref() == Some(b"DeviceGray") {
+        prepared.change.original_bits_per_pixel = stream
+            .dict
+            .get(b"BitsPerComponent")
+            .and_then(Object::as_i64)
+            .ok()
+            .and_then(|bits| u8::try_from(bits).ok())
+            .unwrap_or(8);
+    }
+    result.used_gpu = Some(prepared.used_gpu);
+    result.skipped = false;
+    if (prepared.stream.content.len() as f32)
+        < stream.content.len() as f32 * (1.0 - MIN_SAVING_RATIO)
+    {
+        result.transform = Some(prepared);
+        result.retention_reason = None;
+    } else {
+        result.retention_reason = Some(ImageRetentionReason::InsufficientSavings);
+    }
+    result
 }
 
 fn optimize_images(
     doc: &mut Document,
     page_ids: &[ObjectId],
+    options: ImageCompressionOptions,
     on_progress: &mut dyn FnMut(usize, usize),
 ) -> ImageOptimizationSummary {
     let image_ids = referenced_image_ids(doc, page_ids);
     let mut summary = ImageOptimizationSummary::default();
     let image_count = image_ids.len();
+    summary.statistics.total_images = image_count;
     if image_count == 0 {
         return summary;
     }
@@ -917,7 +1338,10 @@ fn optimize_images(
                     let Some(&image_id) = batch.get(index) else {
                         break;
                     };
-                    if sender.send(process_image(immutable_doc, image_id)).is_err() {
+                    if sender
+                        .send(process_image(immutable_doc, image_id, options))
+                        .is_err()
+                    {
                         break;
                     }
                 });
@@ -934,6 +1358,25 @@ fn optimize_images(
         });
 
         for result in results {
+            let stats = &mut summary.statistics;
+            stats.original_image_bytes += result.original_bytes;
+            stats.output_image_bytes += result.original_bytes;
+            stats.original_pixels += result.original_pixels;
+            stats.output_pixels += result.original_pixels;
+            match result.retention_reason {
+                Some(ImageRetentionReason::Unsupported) => stats.unsupported_images += 1,
+                Some(ImageRetentionReason::Protected) => stats.protected_images += 1,
+                Some(ImageRetentionReason::EncodingFailed) => stats.encoding_failed_images += 1,
+                Some(ImageRetentionReason::InsufficientSavings) => {
+                    stats.insufficient_savings_images += 1
+                }
+                None => {}
+            }
+            match result.used_gpu {
+                Some(true) => summary.gpu_images += 1,
+                Some(false) => summary.cpu_images += 1,
+                None => {}
+            }
             if result.skipped {
                 summary.skipped_images += 1;
             }
@@ -945,12 +1388,28 @@ fn optimize_images(
             }
             if let Some(transform) = result.transform {
                 if let Some(object) = doc.objects.get_mut(&result.image_id) {
+                    let change = transform.change;
+                    stats.output_image_bytes =
+                        stats.output_image_bytes - result.original_bytes + change.output_bytes;
+                    stats.output_pixels = stats.output_pixels - result.original_pixels
+                        + u64::from(change.width) * u64::from(change.height);
+                    stats.color_converted_images += usize::from(change.color_converted);
+                    stats.binarized_images += usize::from(change.binarized);
+                    stats.quantized_images += usize::from(change.quantized);
+                    stats.downsampled_images += usize::from(change.downsampled);
+                    stats.jpeg_images += usize::from(change.encoding == "DCTDecode");
+                    stats.flate_images += usize::from(change.encoding == "FlateDecode");
+                    stats.changes.push(change);
                     *object = Object::Stream(transform.stream);
                     summary.optimized_images += 1;
                 }
             }
         }
     }
+    summary
+        .statistics
+        .changes
+        .sort_by_key(|change| change.object_id);
     summary
 }
 
@@ -1341,6 +1800,11 @@ pub fn process_pdf_with_bookmark_confirmation(
         monochrome_images: 0,
         optimized_images: 0,
         skipped_images: 0,
+        gpu_images: 0,
+        cpu_images: 0,
+        image_acceleration: "未启用".to_string(),
+        image_statistics: None,
+        image_settings: options.compress_images.then_some(options.image_compression),
         original_bytes: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
         output_bytes: 0,
         pdf_repair_status: if options.repair_pdf {
@@ -1496,12 +1960,32 @@ pub fn process_pdf_with_bookmark_confirmation(
                 0.20 + 0.60 * image as f32 / image_count.max(1) as f32,
             );
         };
-        let image_summary = optimize_images(&mut doc, &page_ids, &mut image_progress);
+        let image_summary = optimize_images(
+            &mut doc,
+            &page_ids,
+            options.image_compression,
+            &mut image_progress,
+        );
         result.color_images = image_summary.color_images;
         result.grayscale_images = image_summary.grayscale_images;
         result.monochrome_images = image_summary.monochrome_images;
         result.optimized_images = image_summary.optimized_images;
+        result.image_statistics = Some(image_summary.statistics);
         result.skipped_images = image_summary.skipped_images;
+        result.gpu_images = image_summary.gpu_images;
+        result.cpu_images = image_summary.cpu_images;
+        result.image_acceleration = if !options.image_compression.gpu_acceleration {
+            "CPU（GPU 加速已关闭）".to_string()
+        } else if image_summary.gpu_images + image_summary.cpu_images == 0 {
+            "无需预处理图像".to_string()
+        } else {
+            let status = gpu_images::status();
+            if image_summary.gpu_images == 0 && status.starts_with("GPU") {
+                "CPU（图像较小或超出 GPU 限制）".to_string()
+            } else {
+                status
+            }
+        };
         report("图像处理完成", 0, result.page_count, 0, 0, 0.80);
     } else {
         report("已跳过图片压缩", 0, result.page_count, 0, 0, 0.80);
@@ -1596,6 +2080,9 @@ pub fn process_pdf_with_bookmark_confirmation(
                 result.output_path = "无需输出（压缩后体积没有减小）".to_string();
                 result.output_bytes = 0;
                 result.optimized_images = 0;
+                if let Some(stats) = &mut result.image_statistics {
+                    stats.discard_changes();
+                }
             }
             result.success = true;
             report("处理完成", result.page_count, result.page_count, 0, 0, 1.0);
@@ -2509,7 +2996,7 @@ mod tests {
             channels: 1,
             pixels: vec![0, 255, 0, 255],
         };
-        assert_eq!(classify_image(&monochrome).0, ImageKind::Monochrome);
+        assert_eq!(classify_image(&monochrome), ImageKind::Monochrome);
 
         let grayscale = DecodedImage {
             width: 4,
@@ -2517,7 +3004,8 @@ mod tests {
             channels: 1,
             pixels: vec![0, 80, 160, 255],
         };
-        let (grayscale_kind, grayscale_plane) = classify_image(&grayscale);
+        let grayscale_kind = classify_image(&grayscale);
+        let grayscale_plane = grayscale_plane(&grayscale);
         assert_eq!(grayscale_kind, ImageKind::Grayscale);
         assert_eq!(grayscale_plane.len(), 4);
 
@@ -2527,7 +3015,602 @@ mod tests {
             channels: 3,
             pixels: vec![255, 0, 0, 0, 0, 255],
         };
-        assert_eq!(classify_image(&color).0, ImageKind::Color);
+        assert_eq!(classify_image(&color), ImageKind::Color);
+    }
+
+    #[test]
+    fn cpu_fallback_preserves_pixels_dimensions_and_monochrome_row_padding() {
+        let image = DecodedImage {
+            width: 9,
+            height: 2,
+            channels: 3,
+            pixels: [
+                0u8, 255, 0, 255, 255, 255, 0, 0, 255, 255, 0, 255, 0, 0, 0, 255, 255, 0,
+            ]
+            .into_iter()
+            .flat_map(|v| [v, v, v])
+            .collect(),
+        };
+        let (pixels, width, height, gpu) =
+            prepare_image(&image, ImageKind::Monochrome, Some(2000), |_| None).unwrap();
+        assert!(!gpu);
+        assert_eq!((width, height), (9, 2));
+        assert_eq!(pixels, [0b01011100, 0b10000000, 0b10100011, 0]);
+        let (pixels, width, height, gpu) =
+            prepare_image(&image, ImageKind::Grayscale, Some(2000), |_| None).unwrap();
+        assert!(!gpu);
+        assert_eq!((width, height), (9, 2));
+        assert_eq!(pixels, grayscale_plane(&image));
+    }
+
+    #[test]
+    fn cpu_fallback_downsamples_large_scans_and_gpu_output_is_used() {
+        let image = DecodedImage {
+            width: 2400,
+            height: 1200,
+            channels: 1,
+            pixels: vec![123; 2400 * 1200],
+        };
+        let (pixels, width, height, gpu) =
+            prepare_image(&image, ImageKind::Grayscale, Some(2000), |_| None).unwrap();
+        assert!(!gpu);
+        assert_eq!((width, height), (2000, 1000));
+        assert_eq!(pixels.len(), 2_000_000);
+        assert!(pixels.iter().all(|v| *v == 123));
+        let (pixels, width, height, gpu) =
+            prepare_image(&image, ImageKind::Grayscale, Some(2000), |request| {
+                assert_eq!((request.target_width, request.target_height), (2000, 1000));
+                Some(vec![122; 2_000_000])
+            })
+            .unwrap();
+        assert!(gpu);
+        assert_eq!((width, height), (2000, 1000));
+        assert!(pixels.iter().all(|v| *v == 122));
+    }
+
+    fn advanced_image_fixture(channels: u8) -> (Stream, DecodedImage) {
+        let mut pixels = Vec::new();
+        for y in 0..128u32 {
+            for x in 0..256u32 {
+                let value = ((x * 37 + y * 19 + x * y) % 256) as u8;
+                if channels == 3 {
+                    pixels.extend_from_slice(&[
+                        value,
+                        value.wrapping_add(60),
+                        value.wrapping_add(120),
+                    ]);
+                } else {
+                    pixels.push(value);
+                }
+            }
+        }
+        let mut dict = Dictionary::new();
+        dict.set("Width", 256);
+        dict.set("Height", 128);
+        dict.set(
+            "ColorSpace",
+            if channels == 3 {
+                "DeviceRGB"
+            } else {
+                "DeviceGray"
+            },
+        );
+        dict.set("BitsPerComponent", 8);
+        dict.set("Filter", "FlateDecode");
+        let stream = Stream::new(dict, compress_flate(&pixels).unwrap());
+        (
+            stream,
+            DecodedImage {
+                width: 256,
+                height: 128,
+                channels,
+                pixels,
+            },
+        )
+    }
+
+    fn image_statistics_fixture() -> (Document, ObjectId) {
+        use flate2::{write::ZlibEncoder, Compression};
+        use std::io::Write;
+        let (mut doc, page) = cropped_page_document();
+        let (mut color, image) = advanced_image_fixture(3);
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::none());
+        encoder.write_all(&image.pixels).unwrap();
+        color.content = encoder.finish().unwrap();
+        let (mut unchanged, _) = advanced_image_fixture(1);
+        unchanged.dict.set("Width", 32);
+        unchanged.dict.set("Height", 32);
+        unchanged.dict.set("BitsPerComponent", 1);
+        unchanged.content = compress_flate(&vec![0; 128]).unwrap();
+        let mut protected = color.clone();
+        protected.dict.set("SMask", Object::Null);
+        let mut unsupported = color.clone();
+        unsupported.dict.set("Filter", "JPXDecode");
+        let mut xobjects = Dictionary::new();
+        for (index, mut image) in [color, unchanged, protected, unsupported]
+            .into_iter()
+            .enumerate()
+        {
+            image.dict.set("Type", "XObject");
+            image.dict.set("Subtype", "Image");
+            let id = doc.add_object(image);
+            xobjects.set(format!("Im{index}"), id);
+            if index == 0 {
+                xobjects.set("SharedAlias", id);
+            }
+        }
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Resources", dictionary! { "XObject" => xobjects });
+        (doc, page)
+    }
+
+    #[test]
+    fn image_statistics_count_only_adopted_changes_and_explain_retained_images() {
+        let (mut doc, page) = image_statistics_fixture();
+        let summary = optimize_images(
+            &mut doc,
+            &[page],
+            ImageCompressionOptions {
+                gpu_acceleration: false,
+                allow_color_to_gray: true,
+                color_pixel_percent: 100.0,
+                grayscale_reduction: ColorReduction::Mild,
+                max_long_edge: 128,
+                ..Default::default()
+            },
+            &mut |_, _| {},
+        );
+        let stats = &summary.statistics;
+        assert_eq!(
+            stats.total_images, 4,
+            "shared XObject must be counted only once"
+        );
+        assert_eq!(summary.optimized_images, 1);
+        assert_eq!(stats.changes.len(), 1);
+        assert_eq!(stats.protected_images, 1);
+        assert_eq!(stats.unsupported_images, 1);
+        assert_eq!(stats.insufficient_savings_images, 1);
+        assert_eq!(stats.color_converted_images, 1);
+        assert_eq!(stats.quantized_images, 1);
+        assert_eq!(stats.downsampled_images, 1);
+        assert_eq!(stats.jpeg_images, 1);
+        assert_eq!(stats.binarized_images, 0);
+        let change = &stats.changes[0];
+        assert_eq!((change.original_width, change.original_height), (256, 128));
+        assert_eq!((change.width, change.height), (128, 64));
+        assert_eq!(
+            (change.original_bits_per_pixel, change.bits_per_pixel),
+            (24, 8)
+        );
+        assert!(change.sampled_colors_before > change.sampled_colors_after);
+        assert!(change.sampled_colors_after <= 32);
+        assert_eq!(
+            stats.original_image_bytes - stats.output_image_bytes,
+            change.original_bytes - change.output_bytes
+        );
+        assert_eq!(
+            stats.original_pixels - stats.output_pixels,
+            256 * 128 - 128 * 64
+        );
+        assert_eq!(
+            stats.output_image_bytes,
+            referenced_image_ids(&doc, &[page])
+                .iter()
+                .map(|id| doc
+                    .get_object(*id)
+                    .unwrap()
+                    .as_stream()
+                    .unwrap()
+                    .content
+                    .len() as u64)
+                .sum::<u64>()
+        );
+    }
+
+    #[test]
+    fn image_statistics_discarded_output_does_not_claim_reduction() {
+        let (mut doc, page) = image_statistics_fixture();
+        let mut summary = optimize_images(
+            &mut doc,
+            &[page],
+            ImageCompressionOptions {
+                gpu_acceleration: false,
+                allow_color_to_gray: true,
+                color_pixel_percent: 100.0,
+                grayscale_reduction: ColorReduction::Aggressive,
+                max_long_edge: 128,
+                ..Default::default()
+            },
+            &mut |_, _| {},
+        );
+        assert_eq!(summary.statistics.binarized_images, 1);
+        let written = summary.statistics.changes.len();
+        summary.statistics.discard_changes();
+        let stats = &summary.statistics;
+        assert_eq!(stats.discarded_images, written);
+        assert!(stats.changes.is_empty());
+        assert_eq!(stats.output_image_bytes, stats.original_image_bytes);
+        assert_eq!(stats.output_pixels, stats.original_pixels);
+        assert_eq!(
+            (
+                stats.binarized_images,
+                stats.quantized_images,
+                stats.downsampled_images,
+                stats.color_converted_images,
+                stats.jpeg_images,
+                stats.flate_images
+            ),
+            (0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!(
+            stats.protected_images
+                + stats.unsupported_images
+                + stats.insufficient_savings_images
+                + stats.discarded_images,
+            stats.total_images
+        );
+    }
+
+    #[test]
+    fn image_statistics_do_not_count_rejected_quantization_candidates() {
+        let (mut doc, page) = cropped_page_document();
+        let (mut original, _) = advanced_image_fixture(1);
+        original.content = compress_flate(&vec![120; 256 * 128]).unwrap();
+        original.dict.set("Subtype", "Image");
+        let id = doc.add_object(original);
+        let options = ImageCompressionOptions {
+            gpu_acceleration: false,
+            downsample: false,
+            grayscale_reduction: ColorReduction::Mild,
+            ..Default::default()
+        };
+        let stream = doc.get_object(id).unwrap().as_stream().unwrap();
+        let decoded = decode_image(&doc, stream).unwrap();
+        assert!(
+            transformed_stream(stream, &decoded, classify_image(&decoded), options)
+                .unwrap()
+                .change
+                .quantized
+        );
+        doc.get_dictionary_mut(page).unwrap().set(
+            "Resources",
+            dictionary! { "XObject" => dictionary! { "Im" => id } },
+        );
+        let summary = optimize_images(&mut doc, &[page], options, &mut |_, _| {});
+        assert_eq!(summary.optimized_images, 0);
+        assert_eq!(summary.statistics.insufficient_savings_images, 1);
+        assert_eq!(summary.statistics.quantized_images, 0);
+        assert!(summary.statistics.changes.is_empty());
+        assert_eq!(
+            summary.statistics.original_image_bytes,
+            summary.statistics.output_image_bytes
+        );
+    }
+
+    #[test]
+    fn sampled_palette_diagnostics_handle_rgb_gray_and_empty_pixels() {
+        assert_eq!(sampled_color_count(&[0, 0, 0, 255, 0, 0, 0, 0, 0], 3), 2);
+        assert_eq!(sampled_color_count(&[0, 1, 2, 255, 255], 1), 4);
+        assert_eq!(sampled_color_count(&[], 1), 0);
+    }
+
+    #[test]
+    fn advanced_jpeg_quality_changes_color_and_grayscale_encoding() {
+        for channels in [1, 3] {
+            let (original, image) = advanced_image_fixture(channels);
+            let kind = if channels == 3 {
+                ImageKind::Color
+            } else {
+                ImageKind::Grayscale
+            };
+            let low = transformed_stream(
+                &original,
+                &image,
+                kind,
+                ImageCompressionOptions {
+                    jpeg_quality: 25,
+                    downsample: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let high = transformed_stream(
+                &original,
+                &image,
+                kind,
+                ImageCompressionOptions {
+                    jpeg_quality: 95,
+                    downsample: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(low.stream.content.len() < high.stream.content.len());
+            let decoded = image::load_from_memory(&low.stream.content).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (256, 128));
+            assert_eq!(
+                low.stream
+                    .dict
+                    .get(b"ColorSpace")
+                    .unwrap()
+                    .as_name()
+                    .unwrap(),
+                if channels == 3 {
+                    b"DeviceRGB".as_slice()
+                } else {
+                    b"DeviceGray".as_slice()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn advanced_resize_applies_to_color_gray_and_binary_without_upscaling() {
+        for channels in [1, 3] {
+            let (mut original, image) = advanced_image_fixture(channels);
+            for binary in [false, true] {
+                if channels == 3 && binary {
+                    continue;
+                }
+                original
+                    .dict
+                    .set("BitsPerComponent", if binary { 1 } else { 8 });
+                let kind = if channels == 3 {
+                    ImageKind::Color
+                } else if binary {
+                    ImageKind::Monochrome
+                } else {
+                    ImageKind::Grayscale
+                };
+                for (enabled, edge, expected) in [
+                    (true, 128, (128, 64)),
+                    (false, 128, (256, 128)),
+                    (true, 1000, (256, 128)),
+                ] {
+                    let result = transformed_stream(
+                        &original,
+                        &image,
+                        kind,
+                        ImageCompressionOptions {
+                            downsample: enabled,
+                            max_long_edge: edge,
+                            jpeg_enabled: false,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        result.stream.dict.get(b"Width").unwrap().as_i64().unwrap(),
+                        expected.0
+                    );
+                    assert_eq!(
+                        result.stream.dict.get(b"Height").unwrap().as_i64().unwrap(),
+                        expected.1
+                    );
+                    let decoded = decode_image(&Document::new(), &result.stream).unwrap();
+                    assert_eq!((decoded.width as i64, decoded.height as i64), expected);
+                    assert_eq!(decoded.channels, channels);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn advanced_color_conversion_requires_permission_and_obeys_both_thresholds() {
+        let (original, _) = advanced_image_fixture(3);
+        let image = DecodedImage {
+            width: 256,
+            height: 128,
+            channels: 3,
+            pixels: [100, 115, 100].repeat(256 * 128),
+        };
+        for (allowed, difference, percent, expected) in [
+            (false, 20, 100.0, "DeviceRGB"),
+            (true, 20, 0.0, "DeviceGray"),
+            (true, 10, 99.0, "DeviceRGB"),
+            (true, 10, 100.0, "DeviceGray"),
+        ] {
+            let result = transformed_stream(
+                &original,
+                &image,
+                ImageKind::Color,
+                ImageCompressionOptions {
+                    allow_color_to_gray: allowed,
+                    color_difference: difference,
+                    color_pixel_percent: percent,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                result
+                    .stream
+                    .dict
+                    .get(b"ColorSpace")
+                    .unwrap()
+                    .as_name()
+                    .unwrap(),
+                expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn advanced_conversion_off_preserves_faint_color_on_neutral_scans() {
+        let (original, _) = advanced_image_fixture(3);
+        let image = DecodedImage {
+            width: 256,
+            height: 128,
+            channels: 3,
+            pixels: [100, 105, 100].repeat(256 * 128),
+        };
+        assert_eq!(classify_image(&image), ImageKind::Grayscale);
+        let result = transformed_stream(
+            &original,
+            &image,
+            classify_image(&image),
+            ImageCompressionOptions {
+                jpeg_enabled: false,
+                downsample: false,
+                grayscale_reduction: ColorReduction::Aggressive,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let decoded = decode_image(&Document::new(), &result.stream).unwrap();
+        assert_eq!(decoded.channels, 3);
+        assert_eq!(decoded.pixels, image.pixels);
+    }
+
+    #[test]
+    fn advanced_reduction_modes_preserve_gray_or_color_and_binary_is_opt_in() {
+        let (original, image) = advanced_image_fixture(1);
+        for mode in [
+            ColorReduction::Preserve,
+            ColorReduction::Mild,
+            ColorReduction::Aggressive,
+        ] {
+            let result = transformed_stream(
+                &original,
+                &image,
+                ImageKind::Grayscale,
+                ImageCompressionOptions {
+                    jpeg_enabled: false,
+                    downsample: false,
+                    grayscale_reduction: mode,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let decoded = decode_image(&Document::new(), &result.stream).unwrap();
+            let levels: BTreeSet<_> = decoded.pixels.iter().copied().collect();
+            if mode == ColorReduction::Preserve {
+                assert_eq!(decoded.pixels, image.pixels);
+            } else if mode == ColorReduction::Mild {
+                assert!(levels.len() <= 32);
+                assert!(levels.len() > 2);
+            } else {
+                assert_eq!(levels, BTreeSet::from([0, 255]));
+            }
+        }
+        let (original, image) = advanced_image_fixture(3);
+        for (mode, max_levels) in [
+            (ColorReduction::Preserve, 256),
+            (ColorReduction::Mild, 32),
+            (ColorReduction::Aggressive, 8),
+        ] {
+            let result = transformed_stream(
+                &original,
+                &image,
+                ImageKind::Color,
+                ImageCompressionOptions {
+                    jpeg_enabled: false,
+                    downsample: false,
+                    color_reduction: mode,
+                    grayscale_reduction: ColorReduction::Aggressive,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let decoded = decode_image(&Document::new(), &result.stream).unwrap();
+            assert_eq!(decoded.channels, 3);
+            for channel in 0..3 {
+                assert!(
+                    decoded
+                        .pixels
+                        .iter()
+                        .skip(channel)
+                        .step_by(3)
+                        .copied()
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        <= max_levels
+                );
+            }
+            if mode == ColorReduction::Preserve {
+                assert_eq!(decoded.pixels, image.pixels);
+            }
+        }
+    }
+
+    #[test]
+    fn advanced_options_defaults_validation_and_mask_protection() {
+        let options: ProcessOptions =
+            serde_json::from_str(r#"{"imageCompression":{"jpegQuality":65}}"#).unwrap();
+        assert_eq!(options.image_compression.jpeg_quality, 65);
+        assert_eq!(options.image_compression.max_long_edge, 2000);
+        assert!(!options.image_compression.allow_color_to_gray);
+        assert!(options.validate().is_ok());
+        for invalid in [
+            ImageCompressionOptions {
+                jpeg_quality: 0,
+                ..Default::default()
+            },
+            ImageCompressionOptions {
+                max_long_edge: 0,
+                ..Default::default()
+            },
+            ImageCompressionOptions {
+                allow_color_to_gray: true,
+                color_pixel_percent: f32::NAN,
+                ..Default::default()
+            },
+            ImageCompressionOptions {
+                allow_color_to_gray: true,
+                color_pixel_percent: 101.0,
+                ..Default::default()
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
+        let (mut original, image) = advanced_image_fixture(3);
+        for key in ["SMask", "Mask", "Decode", "DecodeParms"] {
+            original.dict.set(key, Object::Null);
+            assert!(
+                transformed_stream(&original, &image, ImageKind::Color, Default::default())
+                    .is_none()
+            );
+            original.dict.remove(key.as_bytes());
+        }
+    }
+
+    #[test]
+    fn gpu_switch_defaults_on_and_deserializes_explicit_off() {
+        let defaults: ProcessOptions = serde_json::from_str("{}").unwrap();
+        assert!(defaults.image_compression.gpu_acceleration);
+        let options: ProcessOptions =
+            serde_json::from_str(r#"{"imageCompression":{"gpuAcceleration":false}}"#).unwrap();
+        assert!(!options.image_compression.gpu_acceleration);
+    }
+
+    #[test]
+    fn disabled_gpu_processes_eligible_image_on_cpu() {
+        let doc = Document::with_version("1.5");
+        let pixels = vec![127; 512 * 512];
+        let id = (1, 0);
+        let mut doc = doc;
+        doc.objects.insert(
+            id,
+            Object::Stream(Stream::new(
+                lopdf::dictionary! {
+                    "Type" => "XObject", "Subtype" => "Image", "Width" => 512,
+                    "Height" => 512, "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8,
+                    "Filter" => "FlateDecode",
+                },
+                compress_flate(&pixels).unwrap(),
+            )),
+        );
+        let result = process_image(
+            &doc,
+            id,
+            ImageCompressionOptions {
+                gpu_acceleration: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.used_gpu, Some(false));
+        assert!(!result.skipped);
     }
 
     #[test]
@@ -2538,6 +3621,16 @@ mod tests {
 
     #[test]
     fn test_full_rewrite_actually_reduces_pdf_size() {
+        assert_full_rewrite_reduces_pdf_size(128, 128, false);
+    }
+
+    #[test]
+    #[ignore = "requires a hardware GPU"]
+    fn hardware_pdf_compression_uses_gpu_and_produces_readable_smaller_pdf() {
+        assert_full_rewrite_reduces_pdf_size(1024, 1024, true);
+    }
+
+    fn assert_full_rewrite_reduces_pdf_size(width: u32, height: u32, require_gpu: bool) {
         use flate2::{write::ZlibEncoder, Compression};
         use std::io::Write;
 
@@ -2549,8 +3642,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let input = dir.join("scan.pdf");
 
-        let width = 128u32;
-        let height = 128u32;
         let mut rgb = Vec::with_capacity((width * height * 3) as usize);
         for pixel in 0..width * height {
             let value = if pixel % 16 < 8 { 0 } else { 255 };
@@ -2606,12 +3697,32 @@ mod tests {
         let result = process_pdf(input.to_string_lossy().as_ref());
         assert!(result.success, "{:?}", result.error);
         assert!(result.optimized_images > 0);
+        if require_gpu {
+            assert_eq!(result.gpu_images, 1, "{}", result.image_acceleration);
+            assert_eq!(result.cpu_images, 0);
+        } else {
+            assert_eq!(result.cpu_images, 1);
+        }
         assert!(result.output_bytes < result.original_bytes);
 
         let output = PathBuf::from(result.output_path);
         assert!(output.exists());
         let rewritten = Document::load(&output).expect("rewritten PDF should be loadable");
         assert_eq!(rewritten.get_pages().len(), 1);
+        let stats = result.image_statistics.as_ref().unwrap();
+        assert_eq!(stats.total_images, 1);
+        assert_eq!(stats.changes.len(), 1);
+        assert_eq!(
+            stats.output_image_bytes,
+            rewritten
+                .get_object(image_id)
+                .unwrap()
+                .as_stream()
+                .unwrap()
+                .content
+                .len() as u64
+        );
+        assert!(result.image_settings.is_some());
         assert!(!rewritten.trailer.has(b"Prev"));
         assert!(!rewritten.trailer.has(b"XRefStm"));
         let _ = std::fs::remove_file(output);
