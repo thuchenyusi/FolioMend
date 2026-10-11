@@ -118,9 +118,17 @@
                             <div><h3 id="images-title">图像优化</h3><p>减小体积，保留扫描内容</p></div>
                         </div>
                         <label class="check-option">
-                            <span><strong>压缩扫描图像</strong><small>自动识别彩色、灰度和黑白，选择合适的压缩方式</small></span>
+                            <span><strong>压缩扫描图像</strong><small>按图像类型优化体积，JPEG 质量、分辨率和减色可在高级设置中调整</small></span>
                             <input id="option-compress-images" type="checkbox" role="switch" checked>
                         </label>
+                        <label class="check-option">
+                            <span><strong>GPU 加速</strong><small id="gpu-acceleration-description">加速灰度转换与图像缩小；不可用时自动回退 CPU，关闭后全部使用 CPU</small></span>
+                            <input id="option-gpu-acceleration" type="checkbox" role="switch" aria-describedby="gpu-acceleration-description" checked>
+                        </label>
+                        <div class="advanced-image-entry">
+                            <p id="image-settings-summary"></p>
+                            <button id="btn-image-settings" class="btn btn-small" type="button" aria-haspopup="dialog">高级设置 <span aria-hidden="true">↗</span></button>
+                        </div>
                     </section>
 
                     <section class="option-category category-repair" aria-labelledby="repair-title">
@@ -220,6 +228,44 @@
         <p id="bookmark-fit-hint">将文档内书签的跳转显示方式改为适合页面宽度，保留标题、层级与纵向位置。</p>
         <p>外部链接不受影响；无法解析的跳转目标会跳过。</p>
     </div>
+
+    <dialog id="image-settings-dialog" class="advanced-dialog" aria-labelledby="image-settings-title" aria-describedby="image-settings-description">
+        <form id="image-settings-form">
+            <header class="advanced-header">
+                <div><span class="advanced-eyebrow">图像优化 / ADVANCED</span><h2 id="image-settings-title">高级图像设置</h2><p id="image-settings-description">适用于本批次全部 PDF；应用后会记住设置。</p></div>
+                <button id="btn-image-settings-close" class="dialog-close" type="button" aria-label="关闭高级图像设置">×</button>
+            </header>
+            <div class="advanced-body">
+                <section class="advanced-group" aria-labelledby="jpeg-title">
+                    <label class="check-option"><span><strong id="jpeg-title">JPEG 压缩</strong><small>彩色、灰度和黑白图像共用此质量；纯黑白图像会择优保留更小的无损编码。</small></span><input id="advanced-jpeg-enabled" type="checkbox" role="switch" checked></label>
+                    <div class="advanced-field quality-field"><label for="advanced-jpeg-quality">图像质量</label><div class="quality-controls"><input id="advanced-jpeg-slider" type="range" min="1" max="100" value="80" aria-label="JPEG 图像质量"><input id="advanced-jpeg-quality" type="number" min="1" max="100" step="1" value="80" required></div></div>
+                    <p class="advanced-hint">质量越低，通常体积越小，也会损失更多细节。关闭后使用无损 Flate 编码。</p>
+                </section>
+                <section class="advanced-group" aria-labelledby="resolution-title">
+                    <label class="check-option"><span><strong id="resolution-title">降低图像分辨率</strong><small>同时适用于彩色、灰度和黑白图像；仅缩小，不放大。</small></span><input id="advanced-downsample" type="checkbox" role="switch" checked></label>
+                    <div class="advanced-field"><label for="advanced-max-edge">最长边</label><div class="advanced-input-unit"><input id="advanced-max-edge" type="number" min="256" max="20000" step="1" value="2000" required><span>px</span></div></div>
+                    <p class="advanced-hint">按比例限制图像像素，独立于主页的页面宽度。打印或小字扫描可设置更高的值。</p>
+                </section>
+                <section class="advanced-group" aria-labelledby="conversion-title">
+                    <label class="check-option"><span><strong id="conversion-title">允许彩色转为灰度／黑白</strong><small>符合阈值的彩色图像先转为灰度，再按下方黑白／灰度档位减色。</small></span><input id="advanced-allow-gray" type="checkbox" role="switch"></label>
+                    <div class="advanced-thresholds">
+                        <div class="advanced-field"><label for="advanced-color-percent">彩色像素上限</label><div class="advanced-input-unit"><input id="advanced-color-percent" type="number" min="0" max="100" step="any" value="5" required><span>%</span></div></div>
+                        <div class="advanced-field"><label for="advanced-color-difference">颜色差异阈值</label><input id="advanced-color-difference" type="number" min="1" max="255" step="1" value="20" required></div>
+                    </div>
+                    <p class="advanced-hint">采样像素的 RGB 最大差值超过阈值时计为彩色。彩色比例不超过上限才转换；两个值越高，越容易转为灰度。上限 100% 会转换全部可处理的彩色图像。</p>
+                </section>
+                <section class="advanced-group" aria-labelledby="reduction-title">
+                    <h3 id="reduction-title">减色强度</h3>
+                    <div class="advanced-field"><label for="advanced-gray-reduction">黑白／灰度</label><select id="advanced-gray-reduction"><option value="preserve">保留层次</option><option value="mild">适度减色</option><option value="aggressive">强力减色</option></select></div>
+                    <p id="gray-reduction-description" class="advanced-hint"></p>
+                    <div class="advanced-field"><label for="advanced-color-reduction">彩色</label><select id="advanced-color-reduction"><option value="preserve">保留层次</option><option value="mild">适度减色</option><option value="aggressive">强力减色</option></select></div>
+                    <p id="color-reduction-description" class="advanced-hint"></p>
+                </section>
+                <p class="advanced-note">减色在编码前执行，JPEG 编码可能产生近似颜色。新图像至少缩小 2% 才替换；透明蒙版及不支持的图像编码会保留。</p>
+            </div>
+            <footer class="advanced-footer"><button id="btn-image-settings-reset" class="btn btn-secondary" type="button">恢复默认</button><div><button id="btn-image-settings-cancel" class="btn btn-secondary" type="button">取消</button><button class="btn btn-primary" type="submit">应用设置</button></div></footer>
+        </form>
+    </dialog>
 
     <script type="module" src="main.js"></script>
 </body>

@@ -295,3 +295,41 @@ summary:focus-visible { outline: 3px solid #b8c3ff; outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
     *, *::after { transition: none !important; }
 }
+
+/* Advanced settings stay in their own scrollable dialog, away from the main options. */
+.advanced-image-entry { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 7px 0 2px; }
+.advanced-image-entry p { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.advanced-image-entry .btn { flex-shrink: 0; padding: 5px 9px; gap: 6px; font-size: 11px; }
+.advanced-dialog { position: fixed; inset: 0; margin: auto; width: min(660px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 0; border: 1px solid var(--border); border-radius: 16px; color: var(--ink); background: white; box-shadow: 0 24px 80px #23304735; overflow: hidden; }
+.advanced-dialog::backdrop { background: #23304766; }
+.advanced-dialog form { display: flex; flex-direction: column; max-height: calc(100dvh - 34px); }
+.advanced-header { display: flex; justify-content: space-between; align-items: start; gap: 16px; padding: 22px 26px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.advanced-eyebrow { color: var(--accent); font-size: 10px; letter-spacing: 1.3px; }
+.advanced-header h2 { font-size: 21px; margin: 5px 0; }
+.advanced-header p { color: var(--muted); font-size: 12px; }
+.dialog-close { border: 0; background: #f3f5fb; border-radius: 8px; width: 30px; height: 30px; color: var(--muted); font-size: 22px; cursor: pointer; }
+.advanced-body { padding: 2px 26px 18px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.advanced-group { padding: 18px 0; border-bottom: 1px solid var(--border); }
+.advanced-group h3, .advanced-group strong { font-size: 14px; font-weight: 650; }
+.advanced-group .check-option { align-items: start; padding: 0; gap: 20px; }
+.advanced-group .check-option small { font-size: 12px; margin-top: 4px; line-height: 1.6; }
+.advanced-field { display: grid; grid-template-columns: 128px minmax(0, 1fr); align-items: center; gap: 12px; margin-top: 13px; font-size: 12px; }
+.advanced-field input:not([type="range"]), .advanced-field select { min-width: 0; width: 100%; padding: 8px 10px; border: 1px solid #dce2ec; border-radius: 8px; background: white; color: var(--ink); }
+.advanced-field input:disabled { background: #f4f6fa; color: #919bac; cursor: not-allowed; }
+.quality-controls { display: grid; grid-template-columns: minmax(0, 1fr) 72px; align-items: center; gap: 16px; }
+.quality-controls input[type="range"] { width: 100%; accent-color: var(--accent); }
+.advanced-input-unit { display: flex; align-items: center; border: 1px solid #dce2ec; border-radius: 8px; overflow: hidden; }
+.advanced-field .advanced-input-unit input { border: 0; }
+.advanced-input-unit span { color: var(--muted); padding-right: 12px; font-size: 12px; }
+.advanced-input-unit:has(input:disabled) { background: #f4f6fa; }
+.advanced-hint { color: var(--muted); font-size: 11px; line-height: 1.7; margin-top: 8px; }
+.advanced-note { background: #f5f7fc; border-radius: 8px; padding: 11px 13px; font-size: 11px; color: var(--muted); line-height: 1.7; margin-top: 16px; }
+.advanced-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 26px; border-top: 1px solid var(--border); flex-shrink: 0; background: #fafbfe; }
+.advanced-footer > div { display: flex; gap: 8px; }
+@media (max-width: 520px) {
+    .advanced-header { padding: 18px; }
+    .advanced-body { padding-left: 18px; padding-right: 18px; }
+    .advanced-field { grid-template-columns: 100px minmax(0, 1fr); gap: 8px; }
+    .advanced-footer { padding: 14px; gap: 8px; }
+    .advanced-footer .btn { padding: 9px 11px; }
+}

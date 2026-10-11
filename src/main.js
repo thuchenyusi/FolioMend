@@ -170,6 +170,119 @@ btnResultsCollapseAll.addEventListener("click", () => {
     for (const file of resultsList.querySelectorAll("details.result-item")) file.open = false;
 });
 const optionCompressImages = document.getElementById("option-compress-images");
+const optionGpuAcceleration = document.getElementById("option-gpu-acceleration");
+const imageSettingsDialog = document.getElementById("image-settings-dialog");
+const imageSettingsForm = document.getElementById("image-settings-form");
+const btnImageSettings = document.getElementById("btn-image-settings");
+const defaultImageOptions = Object.freeze({
+    gpuAcceleration: true,
+    jpegEnabled: true, jpegQuality: 80, downsample: true, maxLongEdge: 2000,
+    allowColorToGray: false, colorDifference: 20, colorPixelPercent: 5,
+    grayscaleReduction: "preserve", colorReduction: "preserve",
+});
+const imageFields = {
+    jpegEnabled: document.getElementById("advanced-jpeg-enabled"),
+    jpegQuality: document.getElementById("advanced-jpeg-quality"),
+    downsample: document.getElementById("advanced-downsample"),
+    maxLongEdge: document.getElementById("advanced-max-edge"),
+    allowColorToGray: document.getElementById("advanced-allow-gray"),
+    colorDifference: document.getElementById("advanced-color-difference"),
+    colorPixelPercent: document.getElementById("advanced-color-percent"),
+    grayscaleReduction: document.getElementById("advanced-gray-reduction"),
+    colorReduction: document.getElementById("advanced-color-reduction"),
+};
+const jpegSlider = document.getElementById("advanced-jpeg-slider");
+let imageOptions = { ...defaultImageOptions };
+function validStoredImageOption(key, value) {
+    const defaultValue = defaultImageOptions[key];
+    if (typeof defaultValue === "boolean") return typeof value === "boolean";
+    if (typeof defaultValue === "string") return ["preserve", "mild", "aggressive"].includes(value);
+    if (!Number.isFinite(value)) return false;
+    if (key === "colorPixelPercent") return value >= 0 && value <= 100;
+    const ranges = { jpegQuality: [1, 100], maxLongEdge: [256, 20000], colorDifference: [1, 255] };
+    return Number.isInteger(value) && value >= ranges[key][0] && value <= ranges[key][1];
+}
+try {
+    const saved = JSON.parse(localStorage.getItem("imageCompression") || "{}");
+    for (const key of Object.keys(defaultImageOptions)) {
+        if (validStoredImageOption(key, saved?.[key])) imageOptions[key] = saved[key];
+    }
+} catch (_) {}
+optionGpuAcceleration.checked = imageOptions.gpuAcceleration;
+optionGpuAcceleration.addEventListener("change", () => {
+    imageOptions.gpuAcceleration = optionGpuAcceleration.checked;
+    try { localStorage.setItem("imageCompression", JSON.stringify(imageOptions)); } catch (_) {}
+});
+function updateImageSettingsSummary() {
+    optionGpuAcceleration.disabled = isProcessing || !optionCompressImages.checked;
+    const pieces = [imageOptions.jpegEnabled ? `JPEG 质量 ${imageOptions.jpegQuality}` : "无损编码",
+        imageOptions.downsample ? `长边 ${imageOptions.maxLongEdge} px` : "原始分辨率",
+        imageOptions.allowColorToGray ? "允许转灰度" : "保留彩色"];
+    document.getElementById("image-settings-summary").textContent = optionCompressImages.checked
+        ? pieces.join(" · ") : "压缩已关闭，开启后使用高级设置";
+    btnImageSettings.disabled = isProcessing;
+}
+function updateAdvancedControls() {
+    imageFields.jpegQuality.disabled = jpegSlider.disabled = !imageFields.jpegEnabled.checked;
+    imageFields.maxLongEdge.disabled = !imageFields.downsample.checked;
+    imageFields.colorDifference.disabled = imageFields.colorPixelPercent.disabled = !imageFields.allowColorToGray.checked;
+    document.getElementById("gray-reduction-description").textContent = {
+        preserve: "保留灰阶，不主动二值化；原本的 1-bit 黑白图保持黑白。",
+        mild: "编码前收敛到 32 级灰阶，接近纯黑白的图像转为 1-bit 黑白。",
+        aggressive: "转为纯黑白，阈值 160；照片、阴影和浅色笔迹会丢失灰阶。",
+    }[imageFields.grayscaleReduction.value];
+    document.getElementById("color-reduction-description").textContent = {
+        preserve: "保留颜色层次，仍会按 JPEG 质量和分辨率设置压缩。",
+        mild: "编码前每个 RGB 通道收敛到 32 级，最多约 3.3 万种颜色。",
+        aggressive: "编码前每个 RGB 通道收敛到 8 级，最多 512 种颜色；渐变可能出现色带。",
+    }[imageFields.colorReduction.value];
+}
+function fillImageSettings(options) {
+    for (const [key, field] of Object.entries(imageFields)) {
+        if (field.type === "checkbox") field.checked = options[key];
+        else field.value = options[key];
+    }
+    jpegSlider.value = options.jpegQuality;
+    updateAdvancedControls();
+}
+btnImageSettings.addEventListener("click", () => {
+    if (isProcessing) return;
+    closeHelp();
+    fillImageSettings(imageOptions);
+    imageSettingsDialog.showModal();
+});
+for (const id of ["btn-image-settings-close", "btn-image-settings-cancel"]) {
+    document.getElementById(id).addEventListener("click", () => imageSettingsDialog.close());
+}
+document.getElementById("btn-image-settings-reset").addEventListener("click", () => fillImageSettings(defaultImageOptions));
+imageSettingsDialog.addEventListener("close", () => btnImageSettings.focus());
+imageSettingsDialog.addEventListener("click", (event) => {
+    if (event.target !== imageSettingsDialog) return;
+    const bounds = imageSettingsDialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) imageSettingsDialog.close();
+});
+jpegSlider.addEventListener("input", () => { imageFields.jpegQuality.value = jpegSlider.value; });
+imageFields.jpegQuality.addEventListener("input", () => {
+    if (imageFields.jpegQuality.validity.valid) jpegSlider.value = imageFields.jpegQuality.value;
+});
+imageSettingsForm.addEventListener("change", updateAdvancedControls);
+imageSettingsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!imageSettingsForm.reportValidity()) return;
+    const next = { ...imageOptions };
+    for (const [key, field] of Object.entries(imageFields)) {
+        next[key] = field.type === "checkbox" ? field.checked
+            : field.type === "number" ? (field.disabled && !validStoredImageOption(key, field.valueAsNumber)
+                ? imageOptions[key] : field.valueAsNumber) : field.value;
+    }
+    imageOptions = next;
+    try { localStorage.setItem("imageCompression", JSON.stringify(imageOptions)); } catch (_) {}
+    updateImageSettingsSummary();
+    imageSettingsDialog.close();
+});
+optionCompressImages.addEventListener("change", updateImageSettingsSummary);
+updateImageSettingsSummary();
+
 const optionNormalizePages = document.getElementById("option-normalize-pages");
 const optionRepairPdf = document.getElementById("option-repair-pdf");
 try { optionRepairPdf.checked = localStorage.getItem("repairPdf") !== "false"; } catch (_) {}
@@ -224,6 +337,7 @@ customWidth.addEventListener("input", () => {
 function getProcessingOptions() {
     return {
         compressImages: optionCompressImages.checked,
+        imageCompression: { ...imageOptions },
         normalizePages: optionNormalizePages.checked,
         widthMode: widthMode.value,
         customWidth: optionNormalizePages.checked && widthMode.value === "userDefined"
@@ -381,6 +495,7 @@ btnProcess.addEventListener("click", async () => {
     manualPath.disabled = true;
     for (const button of fileList.querySelectorAll(".remove-btn")) button.disabled = true;
     optionCompressImages.disabled = true;
+    updateImageSettingsSummary();
     optionNormalizePages.disabled = true;
     cropMode.disabled = true;
     optionRepairPdf.disabled = true;
@@ -438,6 +553,7 @@ btnProcess.addEventListener("click", async () => {
         manualPath.disabled = false;
         for (const button of fileList.querySelectorAll(".remove-btn")) button.disabled = false;
         optionCompressImages.disabled = false;
+        updateImageSettingsSummary();
         optionNormalizePages.disabled = false;
         cropMode.disabled = false;
         optionRepairPdf.disabled = false;
