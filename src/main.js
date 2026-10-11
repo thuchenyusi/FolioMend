@@ -563,6 +563,76 @@ btnProcess.addEventListener("click", async () => {
     }
 });
 
+function formatCount(value) {
+    return (Number.isFinite(value) ? value : 0).toLocaleString("zh-CN", { maximumFractionDigits: 1 });
+}
+
+function reductionText(before, after) {
+    if (!(before > 0)) return "—";
+    const percent = (1 - after / before) * 100;
+    return `${percent >= 0 ? "减少" : "增加"} ${Math.abs(percent).toFixed(1)}%`;
+}
+
+function renderImageReport(result, options) {
+    if (!result.image_settings && !options.compressImages) return '<p>图片压缩：未启用</p>';
+    const stats = result.image_statistics;
+    const settings = result.image_settings || options.imageCompression;
+    const changes = stats?.changes || [];
+    const classification = `输入识别：彩色 ${formatCount(result.color_images)} · 灰度 ${formatCount(result.grayscale_images)} · 纯黑白 ${formatCount(result.monochrome_images)}`;
+    if (!stats) return `<p>${classification} · 已压缩 ${formatCount(result.optimized_images)} · 跳过 ${formatCount(result.skipped_images)}</p>`;
+    if (!stats.total_images) return '<section class="image-report"><h4>图像优化</h4><p>未发现可引用的扫描图像。</p></section>';
+    const written = result.output_bytes > 0 ? changes.length : 0;
+    const colors = changes.filter(change => change.color_converted || change.binarized || change.quantized);
+    const beforeColors = colors.reduce((total, change) => total + change.sampled_colors_before, 0);
+    const afterColors = colors.reduce((total, change) => total + change.sampled_colors_after, 0);
+    const actionCounts = [
+        ["彩色转灰度／黑白", stats.color_converted_images],
+        ["二值化", stats.binarized_images], ["色阶量化", stats.quantized_images],
+        ["降低分辨率", stats.downsampled_images], ["JPEG 编码", stats.jpeg_images], ["Flate 编码", stats.flate_images],
+    ];
+    const reasons = [
+        ["收益未超过 2%", stats.insufficient_savings_images],
+        ["蒙版或特殊解码参数", stats.protected_images],
+        ["编码或尺寸不支持", stats.unsupported_images],
+        ["重新编码失败", stats.encoding_failed_images],
+        ["整份文件未变小，放弃候选结果", stats.discarded_images],
+    ].filter(([, count]) => count > 0);
+    const reductionNames = { preserve: "保留层次", mild: "适度减色", aggressive: "强力减色" };
+    const settingsText = settings ? [
+        settings.jpegEnabled ? `JPEG 质量 ${settings.jpegQuality}` : "无损 Flate",
+        settings.downsample ? `长边 ≤ ${settings.maxLongEdge} px` : "原始分辨率",
+        `黑白／灰度：${reductionNames[settings.grayscaleReduction] || "—"}`,
+        `彩色：${reductionNames[settings.colorReduction] || "—"}`,
+        settings.allowColorToGray ? `转灰度：彩色比例 ≤ ${settings.colorPixelPercent}%，差异阈值 ${settings.colorDifference}` : "关闭彩色转灰度",
+    ].map(escapeHtml).join(" · ") : "";
+    const rows = changes.map(change => {
+        const actions = [change.color_converted && "转灰度", change.binarized && "二值化", change.quantized && "量化", change.downsampled && "缩小"].filter(Boolean);
+        const encoding = change.encoding === "DCTDecode" ? "JPEG" : "Flate";
+        const sampled = change.color_converted || change.binarized || change.quantized
+            ? `${formatCount(change.sampled_colors_before)} → ${formatCount(change.sampled_colors_after)}` : "—";
+        return `<tr><td>${formatCount(change.object_id[0])} ${formatCount(change.object_id[1])} R</td>
+            <td>${actions.join("、") || "重新编码"}<small>${encoding} · ${change.original_bits_per_pixel} → ${change.bits_per_pixel} bit/像素</small></td>
+            <td>${change.original_width} × ${change.original_height}<small>→ ${change.width} × ${change.height}</small></td>
+            <td>${sampled}</td><td>${formatBytes(change.original_bytes)} → ${formatBytes(change.output_bytes)}<small>${reductionText(change.original_bytes, change.output_bytes)}</small></td></tr>`;
+    }).join("");
+    return `<section class="image-report" aria-label="图像优化统计">
+        <h4>图像优化 · 实际结果</h4>
+        <div class="image-metrics">
+            <div><span>实际写回</span><strong>${formatCount(written)} / ${formatCount(stats.total_images)} 张</strong><small>保留原图 ${formatCount(stats.total_images - written)} 张</small></div>
+            <div><span>图像流节省</span><strong>${formatBytes(stats.original_image_bytes - stats.output_image_bytes)}</strong><small>${formatBytes(stats.original_image_bytes)} → ${formatBytes(stats.output_image_bytes)} · ${reductionText(stats.original_image_bytes, stats.output_image_bytes)}</small></div>
+            <div><span>图像像素</span><strong>${reductionText(stats.original_pixels, stats.output_pixels)}</strong><small>${formatCount(stats.original_pixels / 1e6)} → ${formatCount(stats.output_pixels / 1e6)} 百万像素</small></div>
+        </div>
+        <p class="image-report-types">${classification}</p>
+        <dl class="image-actions">${actionCounts.map(([label, count]) => `<div><dt>${label}</dt><dd>${formatCount(count)} 张</dd></div>`).join("")}</dl>
+        ${colors.length ? `<p class="palette-summary">颜色处理 ${formatCount(colors.length)} 张 · 每张平均采样颜色 <strong>${formatCount(beforeColors / colors.length)} → ${formatCount(afterColors / colors.length)}</strong>（${reductionText(beforeColors, afterColors)}）</p>` : '<p class="palette-summary">没有实际写回的减色或颜色转换；保留颜色层次仍可通过缩小和重新编码节省体积。</p>'}
+        ${reasons.length ? `<p class="retention-reasons"><strong>保留原图原因：</strong>${reasons.map(([reason, count]) => `${reason} ${formatCount(count)} 张`).join("；")}</p>` : ""}
+        <p class="image-report-note">按唯一图像对象统计，共享图像只计一次；同一图像可同时缩小、转换和重新编码。颜色数为每张最多 50,000 个像素的采样值，比较输入与编码前结果，包含缩放、转换和量化的影响；JPEG 输出可能产生近似颜色。</p>
+        ${rows ? `<details class="image-change-details"><summary>逐图处理明细（${formatCount(changes.length)} 张）</summary><div class="image-table-scroll" tabindex="0" role="region" aria-label="逐图处理明细"><table class="image-change-table"><thead><tr><th scope="col">图像对象</th><th scope="col">实际处理</th><th scope="col">像素尺寸</th><th scope="col">采样颜色</th><th scope="col">图像体积</th></tr></thead><tbody>${rows}</tbody></table></div></details>` : ""}
+        <details class="image-settings-used"><summary>本次使用的图像设置</summary><p>${settingsText}</p></details>
+        <p class="image-report-acceleration">预处理：${escapeHtml(result.image_acceleration || "CPU")} · GPU ${formatCount(result.gpu_images)} 张 / CPU ${formatCount(result.cpu_images)} 张（含未采用的候选）</p>
+    </section>`;
+}
+
 function showResults(results) {
     showWorkspace("results");
     resultsControls.hidden = results.length === 0;
@@ -572,6 +642,13 @@ function showResults(results) {
         ? `<span>共 ${results.length} 个文件</span><span class="results-count-success">成功 ${succeeded}</span><span class="${failed ? "results-count-error" : ""}">失败 ${failed}</span>`
         : "暂无处理结果";
     const options = activeOptions || getProcessingOptions();
+    const successful = results.filter(result => result.success);
+    const originalTotal = successful.reduce((total, result) => total + result.original_bytes, 0);
+    const outputTotal = successful.reduce((total, result) => total + (result.output_bytes > 0 ? result.output_bytes : result.original_bytes), 0);
+    if (originalTotal > 0) {
+        const saved = originalTotal - outputTotal;
+        resultsSummary.innerHTML += `<span>合计${saved >= 0 ? "节省" : "增加"} ${formatBytes(Math.abs(saved))} · ${reductionText(originalTotal, outputTotal)}</span>`;
+    }
     resultsList.innerHTML = results.map((r) => {
         const filename = r.input_path.split(/[\\/]/).pop() || r.input_path;
         const status = r.success ? (r.output_bytes > 0 ? "已输出" : "无需处理") : "失败";
@@ -579,8 +656,8 @@ function showResults(results) {
         let preview;
         let detail;
         if (r.success) {
-            const minW = Math.min(...r.original_widths).toFixed(1);
-            const maxW = Math.max(...r.original_widths).toFixed(1);
+            const minW = r.original_widths.length ? Math.min(...r.original_widths).toFixed(1) : "—";
+            const maxW = r.original_widths.length ? Math.max(...r.original_widths).toFixed(1) : "—";
             const sizeChange = r.original_bytes > 0
                 ? (1 - r.output_bytes / r.original_bytes) * 100
                 : 0;
@@ -590,22 +667,23 @@ function showResults(results) {
             preview = r.output_bytes > 0
                 ? `${r.page_count} 页 · ${formatBytes(r.original_bytes)} → ${formatBytes(r.output_bytes)} · ${sizeChangeText}`
                 : `${r.page_count} 页 · 无需生成新文件`;
+            if (r.output_bytes > 0 && r.image_statistics) {
+                const colors = r.image_statistics.changes.filter(change => change.color_converted || change.binarized || change.quantized).length;
+                preview += ` · 颜色处理 ${formatCount(colors)} 张 · 缩小 ${formatCount(r.image_statistics.downsampled_images)} 张`;
+            }
             const sizeDetail = r.output_bytes > 0
                 ? `体积: ${formatBytes(r.original_bytes)} → ${formatBytes(r.output_bytes)}（${sizeChangeText}）<br>`
                 : `原始体积: ${formatBytes(r.original_bytes)}<br>`;
             const normalizationDetail = options.normalizePages
                 ? `可见宽度范围: ${minW} ~ ${maxW} pt | 目标宽度（${options.widthMode === "userDefined" ? "自定义" : "自动识别"}）: ${r.target_width.toFixed(2)} pt`
                 : "页面归一化：未启用";
-            const imageDetail = options.compressImages
-                ? `图像识别: 彩色 ${r.color_images} | 灰度 ${r.grayscale_images} | 纯黑白 ${r.monochrome_images} | 已压缩 ${r.optimized_images} | 跳过 ${r.skipped_images}`
-                : "图片压缩：未启用";
             const cropDetail = options.cropMode === "trueCrop"
                 ? "CropBox：真正裁剪（MediaBox 与可见区域一致）"
                 : "CropBox：按裁剪后的可见宽度对齐";
             detail = `
                 页数: ${r.page_count} | ${normalizationDetail}<br>
                 ${cropDetail}<br>
-                ${imageDetail}<br>
+                ${renderImageReport(r, options)}
                 PDF 自动修复：${escapeHtml(r.pdf_repair_status || "未启用")}<br>
                 书签检测：${escapeHtml(r.bookmark_status || "未启用")}<br>
                 ${options.fitBookmarksToWidth ? `书签适合宽度：已更新 ${r.bookmarks_fit_width || 0}，跳过 ${r.bookmarks_fit_width_skipped || 0}（外部链接或无法解析的目标）<br>` : ""}
