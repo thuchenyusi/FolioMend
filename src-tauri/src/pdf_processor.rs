@@ -1,11 +1,11 @@
 use crate::gpu_images::{self, ImageRequest};
-use flate2::read::ZlibDecoder;
+use crate::pdf_image_filters::{self, ImageData};
 use image::codecs::jpeg::JpegEncoder;
 use image::ExtendedColorType;
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::BTreeSet;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -208,6 +208,7 @@ pub struct ImageStatistics {
     pub flate_images: usize,
     pub unsupported_images: usize,
     pub protected_images: usize,
+    pub already_monochrome_images: usize,
     pub encoding_failed_images: usize,
     pub insufficient_savings_images: usize,
     pub discarded_images: usize,
@@ -259,6 +260,7 @@ pub struct AdaptiveReduction {
 
 #[derive(Debug, Clone, Copy)]
 enum ImageRetentionReason {
+    AlreadyMonochrome,
     Unsupported,
     Protected,
     EncodingFailed,
@@ -666,7 +668,7 @@ fn update_destination_coordinates(
     }
 }
 
-/// 生成输出文件名：添加 "_normalized" 后缀，重名时自动递增。
+#[cfg(test)]
 fn image_filter_names(stream: &Stream) -> Vec<String> {
     stream.filters().unwrap_or_default()
 }
@@ -687,69 +689,62 @@ fn image_color_space(doc: &Document, stream: &Stream) -> Option<Vec<u8>> {
     }
 }
 
-fn has_non_default_decode(stream: &Stream) -> bool {
-    stream.dict.get(b"Decode").is_ok() || stream.dict.get(b"DecodeParms").is_ok()
-}
-
-fn decode_flate_image(
+fn decode_jpx_image(
     doc: &Document,
     stream: &Stream,
     width: u32,
     height: u32,
-    bits_per_component: u8,
+    content: &[u8],
 ) -> Option<DecodedImage> {
-    if has_non_default_decode(stream) || !matches!(bits_per_component, 1 | 8) {
-        return None;
-    }
-
-    let color_space = image_color_space(doc, stream)?;
-    let channels = match color_space.as_slice() {
-        b"DeviceGray" => 1,
-        b"DeviceRGB" => 3,
-        _ => return None,
-    };
-
-    let mut decoder = ZlibDecoder::new(stream.content.as_slice());
-    let mut decoded = Vec::new();
-    decoder.read_to_end(&mut decoded).ok()?;
-
-    let pixel_count = usize::try_from(width.checked_mul(height)?).ok()?;
-    if bits_per_component == 8 {
-        let expected = pixel_count.checked_mul(channels as usize)?;
-        if decoded.len() < expected {
+    // A decoder error or panic must leave the original image intact.
+    std::panic::catch_unwind(|| {
+        use hayro_jpeg2000::{ColorSpace, DecodeSettings, DecoderContext, Image};
+        let image = Image::new(content, &DecodeSettings::default()).ok()?;
+        // Validate the codestream itself before allocating component buffers.
+        if image.width() != width
+            || image.height() != height
+            || image.has_alpha()
+            || !matches!(image.original_bit_depth(), 1..=16)
+        {
             return None;
         }
-        return Some(DecodedImage {
+        let channels = match image_color_space(doc, stream).as_deref() {
+            Some(b"DeviceGray") => 1,
+            Some(b"DeviceRGB") => 3,
+            None if stream.dict.get(b"ColorSpace").is_err() => match image.color_space() {
+                ColorSpace::Gray => 1,
+                ColorSpace::RGB => 3,
+                _ => return None,
+            },
+            // ICC, CMYK and indexed PDF colors need a color-management path.
+            _ => return None,
+        };
+        if image.color_space().num_channels() != channels
+            || !matches!(
+                image.color_space(),
+                ColorSpace::Gray | ColorSpace::RGB | ColorSpace::Unknown { .. }
+            )
+        {
+            return None;
+        }
+        let mut context = DecoderContext::default();
+        let decoded = image.decode(&mut context).ok()?;
+        let pixels = decoded.data_u8();
+        let expected = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(channels as usize)?;
+        if pixels.len() != expected {
+            return None;
+        }
+        Some(DecodedImage {
             width,
             height,
             channels,
-            pixels: decoded[..expected].to_vec(),
-        });
-    }
-
-    if channels != 1 {
-        return None;
-    }
-    let row_bytes = (width as usize + 7) / 8;
-    if decoded.len() < row_bytes.checked_mul(height as usize)? {
-        return None;
-    }
-
-    // Expand a 1-bit PDF image to 8-bit grayscale for classification.
-    let mut pixels = Vec::with_capacity(pixel_count);
-    for y in 0..height as usize {
-        let row = &decoded[y * row_bytes..(y + 1) * row_bytes];
-        for x in 0..width as usize {
-            let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
-            pixels.push(if bit == 0 { 0 } else { 255 });
-        }
-    }
-    Some(DecodedImage {
-        width,
-        height,
-        channels: 1,
-        pixels,
+            pixels,
+        })
     })
+    .ok()
+    .flatten()
 }
 
 fn decode_image(doc: &Document, stream: &Stream) -> Option<DecodedImage> {
@@ -770,24 +765,51 @@ fn decode_image(doc: &Document, stream: &Stream) -> Option<DecodedImage> {
         return None;
     }
 
-    let filters = image_filter_names(stream);
-    if filters.len() == 1 && filters[0] == "DCTDecode" {
-        let image = image::load_from_memory(stream.content.as_slice()).ok()?;
-        let rgb = image.to_rgb8();
-        let (decoded_width, decoded_height) = rgb.dimensions();
-        return Some(DecodedImage {
-            width: decoded_width,
-            height: decoded_height,
-            channels: 3,
-            pixels: rgb.into_raw(),
-        });
+    if stream.dict.get(b"Decode").is_ok() {
+        return None;
     }
-
-    if filters.len() == 1 && filters[0] == "FlateDecode" {
-        return decode_flate_image(doc, stream, width, height, bits);
+    let channels = match image_color_space(doc, stream).as_deref() {
+        Some(b"DeviceGray") => Some(1),
+        Some(b"DeviceRGB") => Some(3),
+        _ => None,
+    };
+    match pdf_image_filters::decode(doc, stream, width, height, channels, bits)? {
+        ImageData::Jpeg2000(content) => decode_jpx_image(doc, stream, width, height, &content),
+        ImageData::Jpeg(content) => {
+            use image::ImageDecoder;
+            let channels = channels?;
+            let decoder =
+                image::codecs::jpeg::JpegDecoder::new(Cursor::new(content.as_ref())).ok()?;
+            if decoder.dimensions() != (width, height)
+                || (channels == 1 && decoder.color_type() != image::ColorType::L8)
+            {
+                return None;
+            }
+            let image = image::DynamicImage::from_decoder(decoder).ok()?;
+            let pixels = if channels == 1 {
+                image.to_luma8().into_raw()
+            } else {
+                image.to_rgb8().into_raw()
+            };
+            Some(DecodedImage {
+                width,
+                height,
+                channels,
+                pixels,
+            })
+        }
+        ImageData::Samples(content) => {
+            let channels = channels?;
+            let pixels =
+                pdf_image_filters::unpack_samples(&content, width, height, channels, bits)?;
+            Some(DecodedImage {
+                width,
+                height,
+                channels,
+                pixels,
+            })
+        }
     }
-
-    None
 }
 
 fn classify_image(image: &DecodedImage) -> ImageKind {
@@ -1094,9 +1116,13 @@ fn sampled_color_count(pixels: &[u8], channels: u8) -> usize {
 }
 
 fn image_is_protected(stream: &Stream) -> bool {
-    stream.dict.get(b"SMask").is_ok()
+    stream
+        .dict
+        .get(b"SMaskInData")
+        .is_ok_and(|value| value.as_i64().ok() != Some(0))
+        || stream.dict.get(b"SMask").is_ok()
         || stream.dict.get(b"Mask").is_ok()
-        || has_non_default_decode(stream)
+        || stream.dict.get(b"Decode").is_ok()
         || stream
             .dict
             .get(b"ImageMask")
@@ -1390,8 +1416,12 @@ fn process_image(
     };
     result.original_bytes = stream.content.len() as u64;
     result.original_pixels = stream_pixel_count(stream);
-    // This distinction must happen before decoding: predictors and masks otherwise
-    // look indistinguishable from an unsupported codec in the result report.
+    if pdf_image_filters::is_bilevel_codec(doc, stream) {
+        result.kind = Some(ImageKind::Monochrome);
+        result.retention_reason = Some(ImageRetentionReason::AlreadyMonochrome);
+        return result;
+    }
+    // Transparency and custom pixel mappings must retain the original stream.
     if image_is_protected(stream) {
         result.retention_reason = Some(ImageRetentionReason::Protected);
         return result;
@@ -1495,6 +1525,9 @@ fn optimize_images(
             stats.output_pixels += result.original_pixels;
             match result.retention_reason {
                 Some(ImageRetentionReason::Unsupported) => stats.unsupported_images += 1,
+                Some(ImageRetentionReason::AlreadyMonochrome) => {
+                    stats.already_monochrome_images += 1
+                }
                 Some(ImageRetentionReason::Protected) => stats.protected_images += 1,
                 Some(ImageRetentionReason::EncodingFailed) => stats.encoding_failed_images += 1,
                 Some(ImageRetentionReason::InsufficientSavings) => {
@@ -3239,6 +3272,359 @@ mod tests {
         )
     }
 
+    // Synthetic 8 x 4 lossless JP2 fixtures: four gray levels and RGB primaries.
+    // They contain no pixels or metadata from user documents.
+    fn jpx_fixture(channels: u8) -> Stream {
+        let hex = if channels == 1 {
+            "0000000c6a5020200d0a870a00000014667479706a703220000000006a7032200000002d6a703268000000166968647200000004000000080001070700000000000f636f6c7201000000000011000000a46a703263ff4fff510029000000000008000000040000000000000000000000080000000400000000000000000001070101ff52000c00000001000004040001ff5c00044040ff640025000143726561746564206279204f70656e4a5045472076657273696f6e20322e352e34ff90000a0000000000320001ff93df810811627ebd51b4aac91e3ce0ff50f7c9f199e28baa3e28ba05861db9a2a0b5baff7fffd9"
+        } else {
+            "0000000c6a5020200d0a870a00000014667479706a703220000000006a7032200000002d6a703268000000166968647200000004000000080003070700000000000f636f6c7201000000000010000000f76a703263ff4fff51002f000000000008000000040000000000000000000000080000000400000000000000000003070101070101070101ff52000c00000001000004040001ff5c00044040ff640025000143726561746564206279204f70656e4a5045472076657273696f6e20322e352e34ff90000a00000000007f0001ff93df81181725d9619f707ee7e221be83ec80316683c4eb7d6d2eada5d5b4bab69756d2eada5d5adf8118115ef45d6d2ba5d45be7a4f01603f0adbaf9be6f9be6f9be6f9be6f9be6f9be6f9be6fdf8110114f862acf81c4d7e20738c4903523c1aeae13adf5b4bab69756d2eada5d5b4bab69ffd9"
+        };
+        let content = hex
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 8, "Height" => 4,
+                "BitsPerComponent" => 8, "Filter" => "JPXDecode",
+                "ColorSpace" => if channels == 1 { "DeviceGray" } else { "DeviceRGB" },
+            },
+            content,
+        )
+    }
+
+    #[test]
+    fn jpx_decodes_container_and_raw_codestream_with_exact_gray_and_rgb_pixels() {
+        let doc = Document::new();
+        for channels in [1, 3] {
+            let stream = jpx_fixture(channels);
+            let expected = if channels == 1 {
+                [0, 85, 170, 255].repeat(8)
+            } else {
+                [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255].repeat(8)
+            };
+            for raw in [false, true] {
+                let mut stream = stream.clone();
+                if raw {
+                    let offset = stream
+                        .content
+                        .windows(4)
+                        .position(|bytes| bytes == [0xff, 0x4f, 0xff, 0x51])
+                        .unwrap();
+                    stream.content = stream.content[offset..].to_vec();
+                }
+                let decoded = decode_image(&doc, &stream).unwrap();
+                assert_eq!(
+                    (decoded.width, decoded.height, decoded.channels),
+                    (8, 4, channels)
+                );
+                assert_eq!(decoded.pixels, expected);
+            }
+            let mut embedded_color = stream.clone();
+            embedded_color.dict.remove(b"ColorSpace");
+            embedded_color.dict.remove(b"BitsPerComponent");
+            assert_eq!(
+                decode_image(&doc, &embedded_color).unwrap().pixels,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn jpx_preserves_unsafe_color_transparency_mismatched_size_and_invalid_streams() {
+        let doc = Document::new();
+        let original = jpx_fixture(1);
+        for (key, value) in [
+            ("Width", Object::Integer(7)),
+            ("Height", Object::Integer(5)),
+            ("Width", Object::Integer(80_000_001)),
+            ("ColorSpace", Object::Name(b"DeviceRGB".to_vec())),
+            ("ColorSpace", Object::Name(b"DeviceCMYK".to_vec())),
+            (
+                "ColorSpace",
+                Object::Array(vec![
+                    Object::Name(b"ICCBased".to_vec()),
+                    Object::Reference((99, 0)),
+                ]),
+            ),
+        ] {
+            let mut stream = original.clone();
+            stream.dict.set(key, value);
+            assert!(decode_image(&doc, &stream).is_none(), "{key}");
+        }
+        let mut malformed = original.clone();
+        malformed.content.truncate(10);
+        assert!(decode_image(&doc, &malformed).is_none());
+        let mut doc = doc;
+        for value in [Object::Integer(1), Object::Integer(2), Object::Null] {
+            let mut stream = original.clone();
+            stream.dict.set("SMaskInData", value);
+            let id = doc.add_object(stream);
+            let result = process_image(&doc, id, ImageCompressionOptions::default());
+            assert!(matches!(
+                result.retention_reason,
+                Some(ImageRetentionReason::Protected)
+            ));
+            assert!(result.transform.is_none());
+        }
+        let mut unmasked = original;
+        unmasked.dict.set("SMaskInData", 0);
+        assert!(!image_is_protected(&unmasked));
+        assert!(decode_image(&doc, &unmasked).is_some());
+    }
+
+    #[test]
+    fn jpx_images_reach_adaptive_reencoding_and_smaller_candidates_are_adopted() {
+        let mut doc = Document::new();
+        for channels in [1, 3] {
+            let original = jpx_fixture(channels);
+            let before = decode_image(&doc, &original).unwrap();
+            let id = doc.add_object(original);
+            let result = process_image(
+                &doc,
+                id,
+                ImageCompressionOptions {
+                    gpu_acceleration: false,
+                    jpeg_enabled: false,
+                    downsample: false,
+                    grayscale_reduction: ColorReduction::Auto,
+                    color_reduction: ColorReduction::Auto,
+                    ..Default::default()
+                },
+            );
+            assert!(result.retention_reason.is_none());
+            let transformed = result.transform.unwrap();
+            assert!(transformed.stream.content.len() < result.original_bytes as usize);
+            assert_eq!(image_filter_names(&transformed.stream), ["FlateDecode"]);
+            assert_eq!(
+                decode_image(&doc, &transformed.stream).unwrap().pixels,
+                before.pixels
+            );
+            let decision = transformed.change.adaptive_reduction.unwrap();
+            assert_eq!(decision.levels, if channels == 1 { 4 } else { 2 });
+            assert_eq!(decision.per_channel, channels == 3);
+        }
+    }
+
+    fn hex_wrapper(mut stream: Stream) -> Stream {
+        let filters = stream.filters().unwrap();
+        let names = std::iter::once(Object::Name(b"ASCIIHexDecode".to_vec()))
+            .chain(
+                filters
+                    .into_iter()
+                    .map(|name| Object::Name(name.into_bytes())),
+            )
+            .collect::<Vec<_>>();
+        stream.content = stream
+            .content
+            .iter()
+            .flat_map(|byte| format!("{byte:02x}").into_bytes())
+            .chain([b'>'])
+            .collect();
+        stream.dict.set("Filter", names);
+        stream
+    }
+
+    #[test]
+    fn common_lossless_codecs_reach_compression_without_changing_pixels() {
+        use weezl::{encode::Encoder, BitOrder};
+        let (original, image) = advanced_image_fixture(1);
+        let mut streams = Vec::new();
+        for early in [0, 1] {
+            let mut encoder = if early == 1 {
+                Encoder::with_tiff_size_switch(BitOrder::Msb, 8)
+            } else {
+                Encoder::new(BitOrder::Msb, 8)
+            };
+            let mut stream = original.clone();
+            stream.content = encoder.encode(&image.pixels).unwrap();
+            stream.dict.set("Filter", "LZWDecode");
+            stream
+                .dict
+                .set("DecodeParms", dictionary! {"EarlyChange" => early});
+            streams.push(stream);
+        }
+        let mut run_length = original.clone();
+        run_length.dict.set("Filter", "RunLengthDecode");
+        run_length.content = image
+            .pixels
+            .chunks(128)
+            .flat_map(|chunk| std::iter::once((chunk.len() - 1) as u8).chain(chunk.iter().copied()))
+            .chain([128])
+            .collect();
+        streams.push(hex_wrapper(run_length.clone()));
+        streams.push(run_length);
+        let mut raw = original.clone();
+        raw.dict.remove(b"Filter");
+        raw.content = image.pixels.clone();
+        streams.push(raw);
+        for predictor in [2, 15] {
+            let mut data = Vec::new();
+            for row in image.pixels.chunks_exact(image.width as usize) {
+                if predictor == 15 {
+                    data.push(1);
+                }
+                data.push(row[0]);
+                data.extend(row.windows(2).map(|pair| pair[1].wrapping_sub(pair[0])));
+            }
+            let mut stream = original.clone();
+            stream.content = compress_flate(&data).unwrap();
+            stream.dict.set(
+                "DecodeParms",
+                dictionary! {"Predictor" => predictor, "Columns" => i64::from(image.width)},
+            );
+            // ASCIIHex + Flate with predictor parameters in their correct slot.
+            let params = stream.dict.remove(b"DecodeParms").unwrap();
+            stream = hex_wrapper(stream);
+            stream.dict.set("DecodeParms", vec![Object::Null, params]);
+            streams.push(stream);
+        }
+        let options = ImageCompressionOptions {
+            gpu_acceleration: false,
+            jpeg_enabled: false,
+            downsample: false,
+            ..Default::default()
+        };
+        let mut doc = Document::new();
+        let mut adopted = 0;
+        for stream in streams {
+            assert_eq!(decode_image(&doc, &stream).unwrap().pixels, image.pixels);
+            let id = doc.add_object(stream);
+            let result = process_image(&doc, id, options);
+            assert!(!result.skipped);
+            if let Some(transformed) = result.transform {
+                assert!(transformed.stream.content.len() < result.original_bytes as usize);
+                assert_eq!(
+                    decode_image(&doc, &transformed.stream).unwrap().pixels,
+                    image.pixels
+                );
+                assert!(transformed.stream.dict.get(b"DecodeParms").is_err());
+                adopted += 1;
+            }
+        }
+        assert!(
+            adopted >= 4,
+            "LZW, RunLength, wrapped RunLength and raw samples must shrink"
+        );
+    }
+
+    #[test]
+    fn jpeg_and_jpx_support_outer_filters_preserving_gray_and_rgb() {
+        let doc = Document::new();
+        for channels in [1, 3] {
+            let (mut stream, image) = advanced_image_fixture(channels);
+            stream.content =
+                encode_jpeg(&image.pixels, image.width, image.height, channels, 90).unwrap();
+            stream.dict.set("Filter", "DCTDecode");
+            let before = decode_image(&doc, &stream).unwrap();
+            assert_eq!(before.channels, channels);
+            assert_eq!(
+                decode_image(&doc, &hex_wrapper(stream.clone()))
+                    .unwrap()
+                    .pixels,
+                before.pixels
+            );
+            stream.content = compress_flate(&stream.content).unwrap();
+            stream.dict.set(
+                "Filter",
+                vec![
+                    Object::Name(b"FlateDecode".to_vec()),
+                    Object::Name(b"DCTDecode".to_vec()),
+                ],
+            );
+            assert_eq!(decode_image(&doc, &stream).unwrap().pixels, before.pixels);
+            stream.dict.set("Width", i64::from(image.width) + 1);
+            assert!(decode_image(&doc, &stream).is_none());
+            let jpx = jpx_fixture(channels);
+            let before = decode_image(&doc, &jpx).unwrap();
+            assert_eq!(
+                decode_image(&doc, &hex_wrapper(jpx)).unwrap().pixels,
+                before.pixels
+            );
+        }
+    }
+
+    #[test]
+    fn bilevel_codecs_are_retained_without_decoding_and_reported_separately() {
+        let (mut doc, page) = cropped_page_document();
+        let mut xobjects = Dictionary::new();
+        let mut originals = Vec::new();
+        for (index, codec) in ["CCITTFaxDecode", "JBIG2Decode"].into_iter().enumerate() {
+            let mut stream = jpx_fixture(1);
+            stream.dict.set("Filter", codec);
+            stream.dict.set("BitsPerComponent", 1);
+            stream.dict.set("DecodeParms", dictionary! {"K" => -1});
+            // Invalid codec payload intentionally proves that no decoder is invoked.
+            stream.content = vec![11, 22, 33];
+            if index == 1 {
+                stream = hex_wrapper(stream);
+            }
+            let id = doc.add_object(stream.clone());
+            xobjects.set(format!("Im{index}"), id);
+            let result = process_image(&doc, id, Default::default());
+            assert!(matches!(
+                result.retention_reason,
+                Some(ImageRetentionReason::AlreadyMonochrome)
+            ));
+            assert!(result.skipped && result.transform.is_none() && result.used_gpu.is_none());
+            originals.push((id, stream));
+        }
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Resources", dictionary! {"XObject" => xobjects});
+        let summary = optimize_images(&mut doc, &[page], Default::default(), &mut |_, _| {});
+        assert_eq!(summary.statistics.already_monochrome_images, 2);
+        assert_eq!(summary.monochrome_images, 2);
+        assert_eq!(summary.skipped_images, 2);
+        assert_eq!(summary.statistics.unsupported_images, 0);
+        assert_eq!(summary.statistics.protected_images, 0);
+        assert_eq!(summary.optimized_images, 0);
+        for (id, original) in originals {
+            let retained = doc.get_object(id).unwrap().as_stream().unwrap();
+            assert_eq!(retained.content, original.content);
+            assert_eq!(retained.dict, original.dict);
+        }
+    }
+
+    #[test]
+    fn unsupported_parameters_colors_and_malformed_samples_retain_original() {
+        let mut doc = Document::new();
+        let (original, _) = advanced_image_fixture(1);
+        for (key, value) in [
+            (
+                "DecodeParms",
+                Object::Dictionary(dictionary! {"Predictor" => 99}),
+            ),
+            (
+                "DecodeParms",
+                Object::Dictionary(dictionary! {"Predictor" => 15, "Columns" => 7}),
+            ),
+            (
+                "DecodeParms",
+                Object::Dictionary(dictionary! {"Unknown" => 1}),
+            ),
+            (
+                "DecodeParms",
+                Object::Array(vec![Object::Null, Object::Null]),
+            ),
+            ("ColorSpace", Object::Name(b"DeviceCMYK".to_vec())),
+            ("Width", Object::Integer(255)),
+        ] {
+            let mut stream = original.clone();
+            stream.dict.set(key, value);
+            let id = doc.add_object(stream.clone());
+            let result = process_image(&doc, id, Default::default());
+            assert!(result.transform.is_none(), "{key}");
+            assert!(result.skipped);
+            assert_eq!(
+                doc.get_object(id).unwrap().as_stream().unwrap().content,
+                stream.content
+            );
+        }
+    }
+
     fn image_statistics_fixture() -> (Document, ObjectId) {
         use flate2::{write::ZlibEncoder, Compression};
         use std::io::Write;
@@ -3255,7 +3641,7 @@ mod tests {
         let mut protected = color.clone();
         protected.dict.set("SMask", Object::Null);
         let mut unsupported = color.clone();
-        unsupported.dict.set("Filter", "JPXDecode");
+        unsupported.dict.set("Filter", "UnknownDecode");
         let mut xobjects = Dictionary::new();
         for (index, mut image) in [color, unchanged, protected, unsupported]
             .into_iter()
@@ -3958,7 +4344,7 @@ mod tests {
             assert!(invalid.validate().is_err());
         }
         let (mut original, image) = advanced_image_fixture(3);
-        for key in ["SMask", "Mask", "Decode", "DecodeParms"] {
+        for key in ["SMask", "Mask", "Decode"] {
             original.dict.set(key, Object::Null);
             assert!(
                 transformed_stream(&original, &image, ImageKind::Color, Default::default())

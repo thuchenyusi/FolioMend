@@ -1,5 +1,6 @@
 mod bookmark_repair;
 mod gpu_images;
+mod pdf_image_filters;
 mod pdf_processor;
 mod pdf_repair;
 

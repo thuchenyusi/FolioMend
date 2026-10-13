@@ -640,6 +640,7 @@ function renderImageReport(result, options) {
     if (adaptiveChanges.length) actionCounts.push(["自适应选择", adaptiveChanges.length]);
     const reasons = [
         ["收益未超过 2%", stats.insufficient_savings_images],
+        ["已是黑白编码", stats.already_monochrome_images],
         ["蒙版或特殊解码参数", stats.protected_images],
         ["编码或尺寸不支持", stats.unsupported_images],
         ["重新编码失败", stats.encoding_failed_images],
