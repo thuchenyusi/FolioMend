@@ -64,8 +64,34 @@ pub enum WidthMode {
 #[serde(rename_all = "camelCase")]
 pub enum ColorReduction {
     Preserve,
+    Auto,
+    Levels128,
+    Levels64,
+    Levels32,
+    Levels16,
+    Levels8,
+    Levels4,
+    Levels2,
+    Monochrome,
+    // Keep the original API values for callers using older versions.
     Mild,
     Aggressive,
+}
+
+impl ColorReduction {
+    fn levels(self, color: bool) -> Option<u16> {
+        match self {
+            Self::Levels128 => Some(128),
+            Self::Levels64 => Some(64),
+            Self::Levels32 | Self::Mild => Some(32),
+            Self::Levels16 => Some(16),
+            Self::Levels8 => Some(8),
+            Self::Levels4 => Some(4),
+            Self::Levels2 => Some(2),
+            Self::Aggressive if color => Some(8),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
@@ -102,6 +128,9 @@ impl Default for ImageCompressionOptions {
 
 impl ImageCompressionOptions {
     fn validate(self) -> Result<(), String> {
+        if self.color_reduction == ColorReduction::Monochrome {
+            return Err("纯黑白只适用于黑白／灰度设置；彩色减色请选择每通道色阶。".into());
+        }
         if self.jpeg_enabled && !(1..=100).contains(&self.jpeg_quality) {
             return Err("JPEG 质量请输入 1–100 的整数。".into());
         }
@@ -218,6 +247,14 @@ pub struct ImageChange {
     pub encoding: String,
     pub sampled_colors_before: usize,
     pub sampled_colors_after: usize,
+    pub adaptive_reduction: Option<AdaptiveReduction>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdaptiveReduction {
+    pub levels: u16,
+    pub per_channel: bool,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -952,15 +989,91 @@ fn colored_pixel_ratio(image: &DecodedImage, difference: u8) -> f32 {
     colored as f32 / samples.max(1) as f32
 }
 
+fn reduced_value(value: u8, levels: u16) -> u8 {
+    let level = (u16::from(value) * (levels - 1) + 127) / 255;
+    ((level * 255 + (levels - 1) / 2) / (levels - 1)) as u8
+}
+
 fn reduce_levels(pixels: &mut [u8], levels: u16) -> bool {
     let mut changed = false;
     for value in pixels {
-        let level = (u16::from(*value) * (levels - 1) + 127) / 255;
-        let reduced = ((level * 255 + (levels - 1) / 2) / (levels - 1)) as u8;
+        let reduced = reduced_value(*value, levels);
         changed |= *value != reduced;
         *value = reduced;
     }
     changed
+}
+
+// A full histogram bounds work and memory while retaining even rare faint marks.
+// Decisions are made after resize/conversion, before JPEG adds its own errors.
+fn adaptive_reduction(pixels: &[u8], channels: u8) -> AdaptiveReduction {
+    let mut decision = AdaptiveReduction {
+        levels: 256,
+        per_channel: channels == 3,
+        reason: "保留原始层次：没有符合误差限制的减色档位。".into(),
+    };
+    if !matches!(channels, 1 | 3) || pixels.is_empty() || pixels.len() % channels as usize != 0 {
+        return decision;
+    }
+    let mut histograms = [[0u64; 256]; 3];
+    for pixel in pixels.chunks_exact(channels as usize) {
+        for (channel, value) in pixel.iter().enumerate() {
+            histograms[channel][*value as usize] += 1;
+        }
+    }
+    let histograms = &histograms[..channels as usize];
+    let count = pixels.len() as u64 / u64::from(channels);
+    let significant_count = count.div_ceil(1000).max(1);
+    let continuous = histograms.iter().any(|histogram| {
+        histogram
+            .iter()
+            .filter(|count| **count >= significant_count)
+            .count()
+            >= 64
+    });
+    let candidates: &[u16] = if channels == 3 {
+        &[2, 4, 8, 16, 32, 64]
+    } else {
+        &[4, 8, 16, 32, 64, 128]
+    };
+    for &levels in candidates {
+        // Broad distributions need more levels to avoid visible banding.
+        if continuous && levels < if channels == 3 { 32 } else { 64 } {
+            continue;
+        }
+        let mut total_error = 0u64;
+        let mut acceptable = true;
+        for histogram in histograms {
+            for (value, &count) in histogram.iter().enumerate() {
+                if count == 0 {
+                    continue;
+                }
+                let reduced = reduced_value(value as u8, levels);
+                let error = value.abs_diff(reduced as usize);
+                // Do not let a small population of pale strokes disappear into an endpoint.
+                if error > 8 || ((3..=252).contains(&value) && matches!(reduced, 0 | 255)) {
+                    acceptable = false;
+                    break;
+                }
+                total_error += count * error as u64;
+            }
+            if !acceptable {
+                break;
+            }
+        }
+        // Mean absolute error <= 2/255, maximum channel error <= 8/255.
+        if acceptable && total_error <= pixels.len() as u64 * 2 {
+            decision.levels = levels;
+            decision.reason = if continuous {
+                "连续色阶较多，保留更多层次以减轻色带。"
+            } else {
+                "在平均误差和逐色误差限制内选择较低档位，并保护浅色层次。"
+            }
+            .into();
+            return decision;
+        }
+    }
+    decision
 }
 
 // Bound diagnostics independently of scan resolution: this measures sampled colors,
@@ -1031,9 +1144,9 @@ fn transformed_stream(
         == Some(1);
     let binary = !keep_color
         && match options.grayscale_reduction {
-            ColorReduction::Preserve => source_binary,
             ColorReduction::Mild => kind == ImageKind::Monochrome,
-            ColorReduction::Aggressive => true,
+            ColorReduction::Aggressive | ColorReduction::Monochrome => true,
+            _ => source_binary,
         };
     let (mut pixels, width, height, used_gpu, channels) = if keep_color {
         let (width, height) = target_image_size(image, max_edge);
@@ -1060,19 +1173,35 @@ fn transformed_stream(
         })?;
         (bytes, width, height, gpu, 1)
     };
-    let quantized = if keep_color {
-        match options.color_reduction {
-            ColorReduction::Preserve => false,
-            ColorReduction::Mild => reduce_levels(&mut pixels, 32),
-            ColorReduction::Aggressive => reduce_levels(&mut pixels, 8),
+    let reduction = if keep_color {
+        options.color_reduction
+    } else {
+        options.grayscale_reduction
+    };
+    let adaptive_reduction = (reduction == ColorReduction::Auto).then(|| {
+        if binary {
+            AdaptiveReduction {
+                levels: 2,
+                per_channel: false,
+                reason: "原始图像为 1-bit，保持纯黑白。".into(),
+            }
+        } else {
+            adaptive_reduction(&pixels, channels)
         }
+    });
+    let levels = adaptive_reduction
+        .as_ref()
+        .and_then(|decision| (decision.levels < 256).then_some(decision.levels))
+        .or_else(|| reduction.levels(keep_color));
+    let quantized = if keep_color {
+        levels.is_some_and(|levels| reduce_levels(&mut pixels, levels))
     } else if binary && options.jpeg_enabled {
         for value in &mut pixels {
             *value = if *value >= 160 { 255 } else { 0 };
         }
         false
-    } else if !binary && options.grayscale_reduction == ColorReduction::Mild {
-        reduce_levels(&mut pixels, 32)
+    } else if !binary {
+        levels.is_some_and(|levels| reduce_levels(&mut pixels, levels))
     } else {
         false
     };
@@ -1160,6 +1289,7 @@ fn transformed_stream(
         encoding: filter.to_string(),
         sampled_colors_before: sampled_color_count(&image.pixels, image.channels),
         sampled_colors_after,
+        adaptive_reduction,
     };
     Some(ImageTransform {
         stream: Stream::new(dict, content),
@@ -3466,10 +3596,17 @@ mod tests {
     #[test]
     fn advanced_reduction_modes_preserve_gray_or_color_and_binary_is_opt_in() {
         let (original, image) = advanced_image_fixture(1);
-        for mode in [
-            ColorReduction::Preserve,
-            ColorReduction::Mild,
-            ColorReduction::Aggressive,
+        for (mode, expected_levels) in [
+            (ColorReduction::Preserve, 256),
+            (ColorReduction::Levels128, 128),
+            (ColorReduction::Levels64, 64),
+            (ColorReduction::Levels32, 32),
+            (ColorReduction::Levels16, 16),
+            (ColorReduction::Levels8, 8),
+            (ColorReduction::Levels4, 4),
+            (ColorReduction::Monochrome, 2),
+            (ColorReduction::Mild, 32),
+            (ColorReduction::Aggressive, 2),
         ] {
             let result = transformed_stream(
                 &original,
@@ -3487,16 +3624,92 @@ mod tests {
             let levels: BTreeSet<_> = decoded.pixels.iter().copied().collect();
             if mode == ColorReduction::Preserve {
                 assert_eq!(decoded.pixels, image.pixels);
-            } else if mode == ColorReduction::Mild {
-                assert!(levels.len() <= 32);
-                assert!(levels.len() > 2);
-            } else {
+            }
+            assert_eq!(levels.len(), expected_levels, "{mode:?}");
+            let binary = matches!(
+                mode,
+                ColorReduction::Monochrome | ColorReduction::Aggressive
+            );
+            assert_eq!(
+                result
+                    .stream
+                    .dict
+                    .get(b"BitsPerComponent")
+                    .unwrap()
+                    .as_i64()
+                    .unwrap(),
+                if binary { 1 } else { 8 }
+            );
+            assert_eq!(result.change.binarized, binary);
+            if binary {
                 assert_eq!(levels, BTreeSet::from([0, 255]));
+            }
+        }
+        // Near-monochrome 8-bit input must retain gray edge pixels at every numeric level.
+        let image = DecodedImage {
+            width: 256,
+            height: 128,
+            channels: 1,
+            pixels: (0..32768)
+                .map(|index| match index % 256 {
+                    0 => 128,
+                    1 => 192,
+                    2 => 64,
+                    value if value < 128 => 0,
+                    _ => 255,
+                })
+                .collect(),
+        };
+        assert_eq!(classify_image(&image), ImageKind::Monochrome);
+        for mode in [
+            ColorReduction::Levels128,
+            ColorReduction::Levels64,
+            ColorReduction::Levels32,
+            ColorReduction::Levels16,
+            ColorReduction::Levels8,
+            ColorReduction::Levels4,
+        ] {
+            for jpeg_enabled in [false, true] {
+                let result = transformed_stream(
+                    &original,
+                    &image,
+                    ImageKind::Monochrome,
+                    ImageCompressionOptions {
+                        jpeg_enabled,
+                        downsample: false,
+                        gpu_acceleration: false,
+                        grayscale_reduction: mode,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    result
+                        .stream
+                        .dict
+                        .get(b"BitsPerComponent")
+                        .unwrap()
+                        .as_i64()
+                        .unwrap(),
+                    8
+                );
+                assert!(!result.change.binarized);
+                let decoded = decode_image(&Document::new(), &result.stream).unwrap();
+                assert!(decoded
+                    .pixels
+                    .iter()
+                    .any(|value| *value > 0 && *value < 255));
             }
         }
         let (original, image) = advanced_image_fixture(3);
         for (mode, max_levels) in [
             (ColorReduction::Preserve, 256),
+            (ColorReduction::Levels64, 64),
+            (ColorReduction::Levels32, 32),
+            (ColorReduction::Levels16, 16),
+            (ColorReduction::Levels8, 8),
+            (ColorReduction::Levels4, 4),
+            (ColorReduction::Levels2, 2),
             (ColorReduction::Mild, 32),
             (ColorReduction::Aggressive, 8),
         ] {
@@ -3535,6 +3748,156 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_reduction_matches_content_and_protects_rare_faint_pixels() {
+        let gray_palette = [0, 85, 170, 255].repeat(8192);
+        assert_eq!(adaptive_reduction(&gray_palette, 1).levels, 4);
+        let color_palette = [255, 0, 0, 0, 255, 0, 0, 0, 255].repeat(4096);
+        let color = adaptive_reduction(&color_palette, 3);
+        assert_eq!(color.levels, 2);
+        assert!(color.per_channel);
+        let gradient: Vec<_> = (0..=255).cycle().take(32768).collect();
+        let gray = adaptive_reduction(&gradient, 1);
+        assert!(gray.levels >= 64);
+        assert!(!gray.per_channel);
+        assert!(gray.reason.contains("连续色阶"));
+        let rgb_gradient: Vec<_> = gradient
+            .iter()
+            .flat_map(|value| [*value, value.wrapping_add(60), value.wrapping_add(120)])
+            .collect();
+        assert!(adaptive_reduction(&rgb_gradient, 3).levels >= 32);
+
+        for channels in [1, 3] {
+            // Only one pale pixel among many background pixels: sampling or mean
+            // error alone would miss its disappearance into the white background.
+            let mut pixels = vec![255; 32768 * channels as usize];
+            for value in &mut pixels[..channels as usize] {
+                *value = 249;
+            }
+            let decision = adaptive_reduction(&pixels, channels);
+            assert!(decision.levels >= 32);
+            let mut reduced = pixels.clone();
+            reduce_levels(&mut reduced, decision.levels);
+            assert!(reduced[..channels as usize]
+                .iter()
+                .all(|value| *value < 255));
+            let errors: Vec<_> = pixels
+                .iter()
+                .zip(&reduced)
+                .map(|(before, after)| before.abs_diff(*after) as u64)
+                .collect();
+            assert!(errors.iter().all(|error| *error <= 8));
+            assert!(errors.iter().sum::<u64>() <= errors.len() as u64 * 2);
+        }
+        // Dark faint marks need the same endpoint protection.
+        let mut dark = vec![0; 32768];
+        dark[7] = 6;
+        let decision = adaptive_reduction(&dark, 1);
+        assert!(reduced_value(6, decision.levels) > 0);
+        assert_eq!(adaptive_reduction(&[], 1).levels, 256);
+        assert_eq!(adaptive_reduction(&[255], 3).levels, 256);
+    }
+
+    #[test]
+    fn adaptive_stream_reports_actual_levels_and_obeys_conversion_and_binary_rules() {
+        let (original, mut image) = advanced_image_fixture(1);
+        image.pixels = [0, 85, 170, 255].repeat(8192);
+        let auto = ImageCompressionOptions {
+            jpeg_enabled: false,
+            downsample: false,
+            gpu_acceleration: false,
+            grayscale_reduction: ColorReduction::Auto,
+            color_reduction: ColorReduction::Auto,
+            ..Default::default()
+        };
+        let transformed =
+            transformed_stream(&original, &image, ImageKind::Grayscale, auto).unwrap();
+        let decision = transformed.change.adaptive_reduction.as_ref().unwrap();
+        assert_eq!(decision.levels, 4);
+        assert_eq!(
+            decode_image(&Document::new(), &transformed.stream)
+                .unwrap()
+                .pixels,
+            image.pixels
+        );
+        assert!(!transformed.change.binarized);
+        assert!(!transformed.change.quantized);
+        let manual = transformed_stream(
+            &original,
+            &image,
+            ImageKind::Grayscale,
+            ImageCompressionOptions {
+                grayscale_reduction: ColorReduction::Levels4,
+                ..auto
+            },
+        )
+        .unwrap();
+        assert!(manual.change.adaptive_reduction.is_none());
+
+        image.pixels = [0, 255].repeat(16384);
+        // Even a near-monochrome 8-bit image is never automatically binarized.
+        let transformed =
+            transformed_stream(&original, &image, ImageKind::Monochrome, auto).unwrap();
+        assert_eq!(
+            transformed
+                .stream
+                .dict
+                .get(b"BitsPerComponent")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            8
+        );
+        assert!(!transformed.change.binarized);
+        let mut binary_source = original.clone();
+        binary_source.dict.set("BitsPerComponent", 1);
+        let transformed =
+            transformed_stream(&binary_source, &image, ImageKind::Monochrome, auto).unwrap();
+        assert_eq!(
+            transformed
+                .stream
+                .dict
+                .get(b"BitsPerComponent")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            1
+        );
+        assert_eq!(transformed.change.adaptive_reduction.unwrap().levels, 2);
+        assert_eq!(
+            decode_image(&Document::new(), &transformed.stream)
+                .unwrap()
+                .pixels,
+            image.pixels
+        );
+
+        let (original, mut image) = advanced_image_fixture(3);
+        image.pixels = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255].repeat(8192);
+        for allow in [false, true] {
+            let transformed = transformed_stream(
+                &original,
+                &image,
+                ImageKind::Color,
+                ImageCompressionOptions {
+                    allow_color_to_gray: allow,
+                    color_pixel_percent: 100.0,
+                    ..auto
+                },
+            )
+            .unwrap();
+            let decoded = decode_image(&Document::new(), &transformed.stream).unwrap();
+            assert_eq!(decoded.channels, if allow { 1 } else { 3 });
+            assert_eq!(transformed.change.color_converted, allow);
+            let decision = transformed.change.adaptive_reduction.unwrap();
+            assert_eq!(decision.per_channel, !allow);
+            assert!(decision.levels >= if allow { 4 } else { 2 });
+            if !allow {
+                assert_eq!(decoded.pixels, image.pixels);
+            }
+            assert!(!transformed.change.binarized);
+        }
+    }
+
+    #[test]
     fn advanced_options_defaults_validation_and_mask_protection() {
         let options: ProcessOptions =
             serde_json::from_str(r#"{"imageCompression":{"jpegQuality":65}}"#).unwrap();
@@ -3542,7 +3905,37 @@ mod tests {
         assert_eq!(options.image_compression.max_long_edge, 2000);
         assert!(!options.image_compression.allow_color_to_gray);
         assert!(options.validate().is_ok());
+        for value in [
+            "auto",
+            "preserve",
+            "levels128",
+            "levels64",
+            "levels32",
+            "levels16",
+            "levels8",
+            "levels4",
+            "levels2",
+            "monochrome",
+            "mild",
+            "aggressive",
+        ] {
+            let options: ImageCompressionOptions =
+                serde_json::from_value(serde_json::json!({"grayscaleReduction": value})).unwrap();
+            assert!(options.validate().is_ok());
+            assert_eq!(
+                serde_json::to_value(options).unwrap()["grayscaleReduction"],
+                value
+            );
+        }
+        assert!(serde_json::from_value::<ImageCompressionOptions>(
+            serde_json::json!({"grayscaleReduction": "levels3"})
+        )
+        .is_err());
         for invalid in [
+            ImageCompressionOptions {
+                color_reduction: ColorReduction::Monochrome,
+                ..Default::default()
+            },
             ImageCompressionOptions {
                 jpeg_quality: 0,
                 ..Default::default()

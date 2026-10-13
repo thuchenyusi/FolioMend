@@ -191,12 +191,57 @@ const imageFields = {
     grayscaleReduction: document.getElementById("advanced-gray-reduction"),
     colorReduction: document.getElementById("advanced-color-reduction"),
 };
+const grayReductionModes = {
+    auto: { label: "自动（自适应）", hint: "逐图分析灰阶分布和量化误差，自动选择 4–128 级；保护浅色层次和连续渐变。不会自动将 8-bit 图像转为纯黑白，原始 1-bit 图像保持黑白。" },
+    preserve: { label: "保留原始灰阶（默认）", hint: "保留灰阶，不主动二值化；原本的 1-bit 黑白图保持黑白。" },
+    ...Object.fromEntries([128, 64, 32, 16, 8, 4].map(levels => [`levels${levels}`, {
+        label: `${levels} 级灰阶`,
+        hint: `编码前保留 ${levels} 级灰阶，不自动转为纯黑白。${levels >= 64 ? "保留较多明暗层次，适合照片和带阴影的扫描。" : levels >= 16 ? "简化明暗层次，渐变可能出现色带。" : "仅保留少量明暗层次，照片、阴影和浅色笔迹可能损失细节。"}`,
+        group: "灰阶减色 · 逐档减少层次",
+    }])),
+    monochrome: { label: "纯黑白（2 色，阈值 160）", hint: "按阈值 160 转为纯黑白，不保留中间灰阶；适合黑字白底，照片、阴影和浅色笔迹可能丢失。", group: "纯黑白 · 二值化" },
+};
+const colorReductionModes = {
+    auto: { label: "自动（自适应）", hint: "逐图分析颜色分布和量化误差，自动选择每通道 2–64 级；保护少量浅色像素和连续渐变。是否转灰度仍由上方开关控制。" },
+    preserve: { label: "保留原始颜色（默认）", hint: "保留颜色层次，仍会按 JPEG 质量和分辨率设置压缩。" },
+    ...Object.fromEntries([64, 32, 16, 8, 4, 2].map(levels => [`levels${levels}`, {
+        label: `${levels} 级 / 通道 · 最多 ${(levels ** 3).toLocaleString("zh-CN")} 色`,
+        hint: `编码前每个 RGB 通道保留 ${levels} 级，最多 ${(levels ** 3).toLocaleString("zh-CN")} 种颜色；这是通道色阶，不是整张图的调色板大小。${levels >= 32 ? "较多保留颜色层次。" : levels >= 8 ? "渐变可能出现明显色带。" : "颜色会大幅简化，适合颜色较少的图表，照片可能失真。"}`,
+    }])),
+};
+const reductionModes = { grayscaleReduction: grayReductionModes, colorReduction: colorReductionModes };
+function normalizeReduction(key, value) {
+    if (value === "mild") return "levels32";
+    if (value === "aggressive") return key === "grayscaleReduction" ? "monochrome" : "levels8";
+    return value;
+}
+function reductionLabel(key, value) {
+    if (key === "grayscaleReduction" && value === "mild") return "32 级灰阶（旧版自动黑白）";
+    return reductionModes[key][normalizeReduction(key, value)]?.label || "—";
+}
+for (const [key, modes] of Object.entries(reductionModes)) {
+    const select = imageFields[key];
+    const groups = new Map();
+    for (const [value, mode] of Object.entries(modes)) {
+        let parent = select;
+        if (mode.group) {
+            if (!groups.has(mode.group)) {
+                const group = document.createElement("optgroup");
+                group.label = mode.group;
+                select.append(group);
+                groups.set(mode.group, group);
+            }
+            parent = groups.get(mode.group);
+        }
+        parent.append(new Option(mode.label, value));
+    }
+}
 const jpegSlider = document.getElementById("advanced-jpeg-slider");
 let imageOptions = { ...defaultImageOptions };
 function validStoredImageOption(key, value) {
     const defaultValue = defaultImageOptions[key];
     if (typeof defaultValue === "boolean") return typeof value === "boolean";
-    if (typeof defaultValue === "string") return ["preserve", "mild", "aggressive"].includes(value);
+    if (typeof defaultValue === "string") return Object.hasOwn(reductionModes[key], value);
     if (!Number.isFinite(value)) return false;
     if (key === "colorPixelPercent") return value >= 0 && value <= 100;
     const ranges = { jpegQuality: [1, 100], maxLongEdge: [256, 20000], colorDifference: [1, 255] };
@@ -205,7 +250,8 @@ function validStoredImageOption(key, value) {
 try {
     const saved = JSON.parse(localStorage.getItem("imageCompression") || "{}");
     for (const key of Object.keys(defaultImageOptions)) {
-        if (validStoredImageOption(key, saved?.[key])) imageOptions[key] = saved[key];
+        const value = reductionModes[key] ? normalizeReduction(key, saved?.[key]) : saved?.[key];
+        if (validStoredImageOption(key, value)) imageOptions[key] = value;
     }
 } catch (_) {}
 optionGpuAcceleration.checked = imageOptions.gpuAcceleration;
@@ -218,6 +264,8 @@ function updateImageSettingsSummary() {
     const pieces = [imageOptions.jpegEnabled ? `JPEG 质量 ${imageOptions.jpegQuality}` : "无损编码",
         imageOptions.downsample ? `长边 ${imageOptions.maxLongEdge} px` : "原始分辨率",
         imageOptions.allowColorToGray ? "允许转灰度" : "保留彩色"];
+    if (imageOptions.grayscaleReduction !== "preserve") pieces.push(reductionLabel("grayscaleReduction", imageOptions.grayscaleReduction));
+    if (imageOptions.colorReduction !== "preserve") pieces.push(`彩色 ${reductionLabel("colorReduction", imageOptions.colorReduction)}`);
     document.getElementById("image-settings-summary").textContent = optionCompressImages.checked
         ? pieces.join(" · ") : "压缩已关闭，开启后使用高级设置";
     btnImageSettings.disabled = isProcessing;
@@ -226,16 +274,8 @@ function updateAdvancedControls() {
     imageFields.jpegQuality.disabled = jpegSlider.disabled = !imageFields.jpegEnabled.checked;
     imageFields.maxLongEdge.disabled = !imageFields.downsample.checked;
     imageFields.colorDifference.disabled = imageFields.colorPixelPercent.disabled = !imageFields.allowColorToGray.checked;
-    document.getElementById("gray-reduction-description").textContent = {
-        preserve: "保留灰阶，不主动二值化；原本的 1-bit 黑白图保持黑白。",
-        mild: "编码前收敛到 32 级灰阶，接近纯黑白的图像转为 1-bit 黑白。",
-        aggressive: "转为纯黑白，阈值 160；照片、阴影和浅色笔迹会丢失灰阶。",
-    }[imageFields.grayscaleReduction.value];
-    document.getElementById("color-reduction-description").textContent = {
-        preserve: "保留颜色层次，仍会按 JPEG 质量和分辨率设置压缩。",
-        mild: "编码前每个 RGB 通道收敛到 32 级，最多约 3.3 万种颜色。",
-        aggressive: "编码前每个 RGB 通道收敛到 8 级，最多 512 种颜色；渐变可能出现色带。",
-    }[imageFields.colorReduction.value];
+    document.getElementById("gray-reduction-description").textContent = grayReductionModes[imageFields.grayscaleReduction.value].hint;
+    document.getElementById("color-reduction-description").textContent = colorReductionModes[imageFields.colorReduction.value].hint;
 }
 function fillImageSettings(options) {
     for (const [key, field] of Object.entries(imageFields)) {
@@ -573,6 +613,12 @@ function reductionText(before, after) {
     return `${percent >= 0 ? "减少" : "增加"} ${Math.abs(percent).toFixed(1)}%`;
 }
 
+function adaptiveReductionLabel(decision) {
+    if (decision.levels === 256) return "保留原始层次";
+    if (decision.per_channel) return `每通道 ${decision.levels} 级（最多 ${formatCount(decision.levels ** 3)} 色）`;
+    return decision.levels === 2 ? "保持原始纯黑白" : `${decision.levels} 级灰阶`;
+}
+
 function renderImageReport(result, options) {
     if (!result.image_settings && !options.compressImages) return '<p>图片压缩：未启用</p>';
     const stats = result.image_statistics;
@@ -585,11 +631,13 @@ function renderImageReport(result, options) {
     const colors = changes.filter(change => change.color_converted || change.binarized || change.quantized);
     const beforeColors = colors.reduce((total, change) => total + change.sampled_colors_before, 0);
     const afterColors = colors.reduce((total, change) => total + change.sampled_colors_after, 0);
+    const adaptiveChanges = changes.filter(change => change.adaptive_reduction);
     const actionCounts = [
         ["彩色转灰度／黑白", stats.color_converted_images],
         ["二值化", stats.binarized_images], ["色阶量化", stats.quantized_images],
         ["降低分辨率", stats.downsampled_images], ["JPEG 编码", stats.jpeg_images], ["Flate 编码", stats.flate_images],
     ];
+    if (adaptiveChanges.length) actionCounts.push(["自适应选择", adaptiveChanges.length]);
     const reasons = [
         ["收益未超过 2%", stats.insufficient_savings_images],
         ["蒙版或特殊解码参数", stats.protected_images],
@@ -597,21 +645,22 @@ function renderImageReport(result, options) {
         ["重新编码失败", stats.encoding_failed_images],
         ["整份文件未变小，放弃候选结果", stats.discarded_images],
     ].filter(([, count]) => count > 0);
-    const reductionNames = { preserve: "保留层次", mild: "适度减色", aggressive: "强力减色" };
     const settingsText = settings ? [
         settings.jpegEnabled ? `JPEG 质量 ${settings.jpegQuality}` : "无损 Flate",
         settings.downsample ? `长边 ≤ ${settings.maxLongEdge} px` : "原始分辨率",
-        `黑白／灰度：${reductionNames[settings.grayscaleReduction] || "—"}`,
-        `彩色：${reductionNames[settings.colorReduction] || "—"}`,
+        `黑白／灰度：${reductionLabel("grayscaleReduction", settings.grayscaleReduction)}`,
+        `彩色：${reductionLabel("colorReduction", settings.colorReduction)}`,
         settings.allowColorToGray ? `转灰度：彩色比例 ≤ ${settings.colorPixelPercent}%，差异阈值 ${settings.colorDifference}` : "关闭彩色转灰度",
     ].map(escapeHtml).join(" · ") : "";
     const rows = changes.map(change => {
         const actions = [change.color_converted && "转灰度", change.binarized && "二值化", change.quantized && "量化", change.downsampled && "缩小"].filter(Boolean);
+        const automatic = change.adaptive_reduction;
+        const adaptiveText = automatic ? `<small>自动 → ${escapeHtml(adaptiveReductionLabel(automatic))} · ${escapeHtml(automatic.reason)}</small>` : "";
         const encoding = change.encoding === "DCTDecode" ? "JPEG" : "Flate";
         const sampled = change.color_converted || change.binarized || change.quantized
             ? `${formatCount(change.sampled_colors_before)} → ${formatCount(change.sampled_colors_after)}` : "—";
         return `<tr><td>${formatCount(change.object_id[0])} ${formatCount(change.object_id[1])} R</td>
-            <td>${actions.join("、") || "重新编码"}<small>${encoding} · ${change.original_bits_per_pixel} → ${change.bits_per_pixel} bit/像素</small></td>
+            <td>${actions.join("、") || "重新编码"}<small>${encoding} · ${change.original_bits_per_pixel} → ${change.bits_per_pixel} bit/像素</small>${adaptiveText}</td>
             <td>${change.original_width} × ${change.original_height}<small>→ ${change.width} × ${change.height}</small></td>
             <td>${sampled}</td><td>${formatBytes(change.original_bytes)} → ${formatBytes(change.output_bytes)}<small>${reductionText(change.original_bytes, change.output_bytes)}</small></td></tr>`;
     }).join("");

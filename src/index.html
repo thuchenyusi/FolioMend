@@ -255,10 +255,11 @@
                     <p class="advanced-hint">采样像素的 RGB 最大差值超过阈值时计为彩色。彩色比例不超过上限才转换；两个值越高，越容易转为灰度。上限 100% 会转换全部可处理的彩色图像。</p>
                 </section>
                 <section class="advanced-group" aria-labelledby="reduction-title">
-                    <h3 id="reduction-title">减色强度</h3>
-                    <div class="advanced-field"><label for="advanced-gray-reduction">黑白／灰度</label><select id="advanced-gray-reduction"><option value="preserve">保留层次</option><option value="mild">适度减色</option><option value="aggressive">强力减色</option></select></div>
+                    <h3 id="reduction-title">减色档位</h3>
+                    <p class="advanced-hint">可选择自动逐图判断，或手动指定级数。级数越低，层次越少；体积收益取决于图像内容和编码方式。纯黑白单独选择。</p>
+                    <div class="advanced-field"><label for="advanced-gray-reduction">黑白／灰度</label><select id="advanced-gray-reduction" aria-describedby="gray-reduction-description"></select></div>
                     <p id="gray-reduction-description" class="advanced-hint"></p>
-                    <div class="advanced-field"><label for="advanced-color-reduction">彩色</label><select id="advanced-color-reduction"><option value="preserve">保留层次</option><option value="mild">适度减色</option><option value="aggressive">强力减色</option></select></div>
+                    <div class="advanced-field"><label for="advanced-color-reduction">彩色</label><select id="advanced-color-reduction" aria-describedby="color-reduction-description"></select></div>
                     <p id="color-reduction-description" class="advanced-hint"></p>
                 </section>
                 <p class="advanced-note">减色在编码前执行，JPEG 编码可能产生近似颜色。新图像至少缩小 2% 才替换；透明蒙版及不支持的图像编码会保留。</p>
