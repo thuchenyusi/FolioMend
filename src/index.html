@@ -236,6 +236,10 @@
                 <button id="btn-image-settings-close" class="dialog-close" type="button" aria-label="关闭高级图像设置">×</button>
             </header>
             <div class="advanced-body">
+                <section class="advanced-group" aria-labelledby="visual-protection-title">
+                    <label class="check-option"><span><strong id="visual-protection-title">自动保护封面与图片</strong><small>识别首尾页和连续色调区域，对照片、渐变插图使用更保守的压缩。</small></span><input id="advanced-protect-visual" type="checkbox" role="switch" checked></label>
+                    <p class="advanced-hint">触发时保留颜色与灰阶，跳过减色和转灰度；JPEG 质量至少 90，长边上限至少 3000 px，仅缩小不放大。更高质量、原始分辨率和关闭 JPEG 的设置仍有效。按图像启发式判断，可能误判；结果中可查看保护明细。关闭后所有图像统一使用下方参数。</p>
+                </section>
                 <section class="advanced-group" aria-labelledby="jpeg-title">
                     <label class="check-option"><span><strong id="jpeg-title">JPEG 压缩</strong><small>彩色、灰度和黑白图像共用此质量；纯黑白图像会择优保留更小的无损编码。</small></span><input id="advanced-jpeg-enabled" type="checkbox" role="switch" checked></label>
                     <div class="advanced-field quality-field"><label for="advanced-jpeg-quality">图像质量</label><div class="quality-controls"><input id="advanced-jpeg-slider" type="range" min="1" max="100" value="80" aria-label="JPEG 图像质量"><input id="advanced-jpeg-quality" type="number" min="1" max="100" step="1" value="80" required></div></div>

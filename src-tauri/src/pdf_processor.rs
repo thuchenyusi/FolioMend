@@ -1,7 +1,9 @@
 use crate::gpu_images::{self, ImageRequest};
+use crate::jpeg_quantization::JpegQuantization;
 use crate::pdf_image_filters::{self, ImageData};
-use image::codecs::jpeg::JpegEncoder;
-use image::ExtendedColorType;
+use jpeg_encoder::{
+    ColorType as JpegColorType, Encoder as JpegEncoder, QuantizationTableType, SamplingFactor,
+};
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::BTreeSet;
@@ -100,6 +102,8 @@ pub struct ImageCompressionOptions {
     pub gpu_acceleration: bool,
     pub jpeg_enabled: bool,
     pub jpeg_quality: u8,
+    pub optimize_source_jpeg: bool,
+    pub protect_visual_images: bool,
     pub downsample: bool,
     pub max_long_edge: u32,
     pub allow_color_to_gray: bool,
@@ -115,6 +119,8 @@ impl Default for ImageCompressionOptions {
             gpu_acceleration: true,
             jpeg_enabled: true,
             jpeg_quality: 80,
+            optimize_source_jpeg: true,
+            protect_visual_images: true,
             downsample: true,
             max_long_edge: 2000,
             allow_color_to_gray: false,
@@ -213,6 +219,16 @@ pub struct ImageStatistics {
     pub insufficient_savings_images: usize,
     pub discarded_images: usize,
     pub changes: Vec<ImageChange>,
+    pub visual_protections: Vec<VisualProtection>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VisualProtection {
+    pub object_id: ObjectId,
+    pub reason: String,
+    pub jpeg_quality: Option<u8>,
+    pub max_long_edge: Option<u32>,
+    pub retained_original: bool,
 }
 
 impl ImageStatistics {
@@ -227,6 +243,9 @@ impl ImageStatistics {
         self.downsampled_images = 0;
         self.jpeg_images = 0;
         self.flate_images = 0;
+        for protection in &mut self.visual_protections {
+            protection.retained_original = true;
+        }
     }
 }
 
@@ -246,6 +265,7 @@ pub struct ImageChange {
     pub quantized: bool,
     pub downsampled: bool,
     pub encoding: String,
+    pub source_jpeg_quantization: bool,
     pub sampled_colors_before: usize,
     pub sampled_colors_after: usize,
     pub adaptive_reduction: Option<AdaptiveReduction>,
@@ -292,6 +312,7 @@ struct DecodedImage {
     height: u32,
     channels: u8,
     pixels: Vec<u8>,
+    jpeg_quantization: Option<JpegQuantization>,
 }
 
 #[derive(Debug)]
@@ -303,6 +324,7 @@ struct ImageTransform {
 
 #[derive(Debug)]
 struct ImageWorkResult {
+    visual_protection: Option<VisualProtection>,
     original_bytes: u64,
     original_pixels: u64,
     retention_reason: Option<ImageRetentionReason>,
@@ -737,6 +759,7 @@ fn decode_jpx_image(
             return None;
         }
         Some(DecodedImage {
+            jpeg_quantization: None,
             width,
             height,
             channels,
@@ -792,6 +815,7 @@ fn decode_image(doc: &Document, stream: &Stream) -> Option<DecodedImage> {
                 image.to_rgb8().into_raw()
             };
             Some(DecodedImage {
+                jpeg_quantization: JpegQuantization::read(content.as_ref()),
                 width,
                 height,
                 channels,
@@ -803,6 +827,7 @@ fn decode_image(doc: &Document, stream: &Stream) -> Option<DecodedImage> {
             let pixels =
                 pdf_image_filters::unpack_samples(&content, width, height, channels, bits)?;
             Some(DecodedImage {
+                jpeg_quantization: None,
                 width,
                 height,
                 channels,
@@ -904,20 +929,43 @@ fn encode_jpeg(
     channels: u8,
     quality: u8,
 ) -> Option<Vec<u8>> {
+    encode_jpeg_with_quantization(pixels, width, height, channels, quality, None)
+}
+
+fn encode_jpeg_with_quantization(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    channels: u8,
+    quality: u8,
+    quantization: Option<&JpegQuantization>,
+) -> Option<Vec<u8>> {
+    let color = match channels {
+        1 => JpegColorType::Luma,
+        3 => JpegColorType::Rgb,
+        _ => return None,
+    };
+    let width = u16::try_from(width).ok().filter(|value| *value > 0)?;
+    let height = u16::try_from(height).ok().filter(|value| *value > 0)?;
+    if !(1..=100).contains(&quality)
+        || pixels.len() != usize::from(width) * usize::from(height) * usize::from(channels)
+    {
+        return None;
+    }
     let mut output = Vec::new();
-    let mut encoder = JpegEncoder::new_with_quality(Cursor::new(&mut output), quality);
-    encoder
-        .encode(
-            pixels,
-            width,
-            height,
-            if channels == 3 {
-                ExtendedColorType::Rgb8
-            } else {
-                ExtendedColorType::L8
-            },
-        )
-        .ok()?;
+    let mut encoder = JpegEncoder::new(&mut output, quality);
+    // Match the existing 4:4:4 color path: entropy optimization must not introduce
+    // chroma subsampling at lower quality settings.
+    encoder.set_sampling_factor(SamplingFactor::F_1_1);
+    encoder.set_optimized_huffman_tables(true);
+    if let Some(tables) = quantization {
+        let tables = tables.for_quality(quality);
+        encoder.set_quantization_tables(
+            QuantizationTableType::Custom(Box::new(tables.luma)),
+            QuantizationTableType::Custom(Box::new(tables.chroma)),
+        );
+    }
+    encoder.encode(pixels, width, height, color).ok()?;
     Some(output)
 }
 
@@ -1250,8 +1298,30 @@ fn transformed_stream(
     } else {
         sampled_color_count(&pixels, channels)
     };
+    let mut source_jpeg_quantization = false;
     let (content, filter, bits) = if options.jpeg_enabled {
-        let jpeg = encode_jpeg(&pixels, width, height, channels, options.jpeg_quality)?;
+        let mut jpeg = encode_jpeg(&pixels, width, height, channels, options.jpeg_quality)?;
+        if options.optimize_source_jpeg && !binary {
+            if let Some(tables) = image
+                .jpeg_quantization
+                .as_ref()
+                .filter(|tables| tables.channels == channels)
+            {
+                if let Some(source_candidate) = encode_jpeg_with_quantization(
+                    &pixels,
+                    width,
+                    height,
+                    channels,
+                    options.jpeg_quality,
+                    Some(tables),
+                ) {
+                    if source_candidate.len() < jpeg.len() {
+                        jpeg = source_candidate;
+                        source_jpeg_quantization = true;
+                    }
+                }
+            }
+        }
         if binary {
             // Lossless 1-bit Flate often beats JPEG for text; keep the smaller candidate.
             let flate = compress_flate(&pack_monochrome(&pixels, width))?;
@@ -1313,6 +1383,7 @@ fn transformed_stream(
         quantized,
         downsampled: (width, height) != (image.width, image.height),
         encoding: filter.to_string(),
+        source_jpeg_quantization,
         sampled_colors_before: sampled_color_count(&image.pixels, image.channels),
         sampled_colors_after,
         adaptive_reduction,
@@ -1396,12 +1467,158 @@ fn referenced_image_ids(doc: &Document, page_ids: &[ObjectId]) -> Vec<ObjectId> 
     image_ids.into_iter().collect()
 }
 
+fn visual_image_options(
+    image: &DecodedImage,
+    options: ImageCompressionOptions,
+    boundary_page: bool,
+) -> (ImageCompressionOptions, Option<String>) {
+    if !options.protect_visual_images {
+        return (options, None);
+    }
+    let reason = if boundary_page {
+        "首尾页（疑似封面）"
+    } else if crate::image_protection::continuous_tone_fraction(
+        &image.pixels,
+        image.width,
+        image.height,
+        image.channels,
+    ) >= 0.03
+    {
+        "连续色调区域（疑似照片或渐变插图）"
+    } else {
+        return (options, None);
+    };
+    let conservative = ImageCompressionOptions {
+        jpeg_quality: options.jpeg_quality.max(90),
+        max_long_edge: options.max_long_edge.max(3000),
+        allow_color_to_gray: false,
+        grayscale_reduction: ColorReduction::Preserve,
+        color_reduction: ColorReduction::Preserve,
+        ..options
+    };
+    (conservative, Some(reason.into()))
+}
+
+// Use a small, explicit boundary window; short documents only protect their
+// first/last page. This is a cover candidate heuristic, not semantic recognition.
+fn boundary_image_ids(doc: &Document, page_ids: &[ObjectId]) -> BTreeSet<ObjectId> {
+    fn inherited_resources(doc: &Document, mut id: ObjectId) -> Option<&Dictionary> {
+        let mut seen = BTreeSet::new();
+        while seen.insert(id) {
+            let node = doc.get_dictionary(id).ok()?;
+            if let Ok(resources) = node.get(b"Resources") {
+                return doc.dereference(resources).ok()?.1.as_dict().ok();
+            }
+            id = node.get(b"Parent").ok()?.as_reference().ok()?;
+        }
+        None
+    }
+    fn painted_images(
+        doc: &Document,
+        content: &[u8],
+        resources: &Dictionary,
+        seen: &mut BTreeSet<ObjectId>,
+        images: &mut BTreeSet<ObjectId>,
+        depth: usize,
+    ) {
+        if depth > 32 {
+            return;
+        }
+        let Ok(content) = Content::decode(content) else {
+            // On malformed boundary content, favor retaining detail.
+            collect_images_from_resources(doc, resources, seen, images);
+            return;
+        };
+        let Some(xobjects) = resources
+            .get(b"XObject")
+            .ok()
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| o.as_dict().ok())
+        else {
+            return;
+        };
+        for op in content.operations.iter().filter(|op| op.operator == "Do") {
+            let Some(id) = op
+                .operands
+                .first()
+                .and_then(|o| o.as_name().ok())
+                .and_then(|name| xobjects.get(name).ok())
+                .and_then(|o| o.as_reference().ok())
+            else {
+                continue;
+            };
+            if !seen.insert(id) {
+                continue;
+            }
+            let Ok(stream) = doc.get_object(id).and_then(Object::as_stream) else {
+                continue;
+            };
+            match stream.dict.get(b"Subtype").and_then(Object::as_name).ok() {
+                Some(b"Image") => {
+                    images.insert(id);
+                }
+                Some(b"Form") => {
+                    let form_resources = stream
+                        .dict
+                        .get(b"Resources")
+                        .ok()
+                        .and_then(|o| doc.dereference(o).ok())
+                        .and_then(|(_, o)| o.as_dict().ok())
+                        .unwrap_or(resources);
+                    if let Ok(bytes) = stream.get_plain_content() {
+                        painted_images(doc, &bytes, form_resources, seen, images, depth + 1);
+                    } else {
+                        collect_images_from_resources(doc, form_resources, seen, images);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let boundary_pages: Vec<_> = page_ids
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            if page_ids.len() >= 10 {
+                *i < 3 || *i >= page_ids.len() - 2
+            } else {
+                *i == 0 || *i + 1 == page_ids.len()
+            }
+        })
+        .map(|(_, &id)| id)
+        .collect();
+    let mut images = BTreeSet::new();
+    for page in boundary_pages {
+        let Some(resources) = inherited_resources(doc, page) else {
+            continue;
+        };
+        let mut seen = BTreeSet::new();
+        if let Ok(content) = doc.get_page_content(page) {
+            painted_images(doc, &content, resources, &mut seen, &mut images, 0);
+        } else {
+            collect_images_from_resources(doc, resources, &mut seen, &mut images);
+        }
+    }
+    images
+}
+
+#[cfg(test)]
 fn process_image(
     doc: &Document,
     image_id: ObjectId,
     options: ImageCompressionOptions,
 ) -> ImageWorkResult {
+    process_image_with_context(doc, image_id, options, false)
+}
+
+fn process_image_with_context(
+    doc: &Document,
+    image_id: ObjectId,
+    options: ImageCompressionOptions,
+    boundary_page: bool,
+) -> ImageWorkResult {
     let mut result = ImageWorkResult {
+        visual_protection: None,
         image_id,
         kind: None,
         transform: None,
@@ -1430,6 +1647,14 @@ fn process_image(
         return result;
     };
     result.kind = Some(classify_image(&image));
+    let (options, protection_reason) = visual_image_options(&image, options, boundary_page);
+    result.visual_protection = protection_reason.map(|reason| VisualProtection {
+        object_id: image_id,
+        reason,
+        jpeg_quality: options.jpeg_enabled.then_some(options.jpeg_quality),
+        max_long_edge: options.downsample.then_some(options.max_long_edge),
+        retained_original: true,
+    });
     let Some(mut prepared) = transformed_stream(stream, &image, result.kind.unwrap(), options)
     else {
         result.retention_reason = Some(ImageRetentionReason::EncodingFailed);
@@ -1452,6 +1677,9 @@ fn process_image(
     {
         result.transform = Some(prepared);
         result.retention_reason = None;
+        if let Some(protection) = &mut result.visual_protection {
+            protection.retained_original = false;
+        }
     } else {
         result.retention_reason = Some(ImageRetentionReason::InsufficientSavings);
     }
@@ -1465,6 +1693,11 @@ fn optimize_images(
     on_progress: &mut dyn FnMut(usize, usize),
 ) -> ImageOptimizationSummary {
     let image_ids = referenced_image_ids(doc, page_ids);
+    let boundary_ids = if options.protect_visual_images {
+        boundary_image_ids(doc, page_ids)
+    } else {
+        BTreeSet::new()
+    };
     let mut summary = ImageOptimizationSummary::default();
     let image_count = image_ids.len();
     summary.statistics.total_images = image_count;
@@ -1490,6 +1723,7 @@ fn optimize_images(
             let next_index = Arc::new(AtomicUsize::new(0));
             let (sender, receiver) = mpsc::channel();
             let immutable_doc: &Document = doc;
+            let boundary_ids = &boundary_ids;
             for _ in 0..worker_count.min(batch.len()) {
                 let next_index = Arc::clone(&next_index);
                 let sender = sender.clone();
@@ -1499,7 +1733,12 @@ fn optimize_images(
                         break;
                     };
                     if sender
-                        .send(process_image(immutable_doc, image_id, options))
+                        .send(process_image_with_context(
+                            immutable_doc,
+                            image_id,
+                            options,
+                            boundary_ids.contains(&image_id),
+                        ))
                         .is_err()
                     {
                         break;
@@ -1523,6 +1762,9 @@ fn optimize_images(
             stats.output_image_bytes += result.original_bytes;
             stats.original_pixels += result.original_pixels;
             stats.output_pixels += result.original_pixels;
+            if let Some(protection) = result.visual_protection {
+                stats.visual_protections.push(protection);
+            }
             match result.retention_reason {
                 Some(ImageRetentionReason::Unsupported) => stats.unsupported_images += 1,
                 Some(ImageRetentionReason::AlreadyMonochrome) => {
@@ -1573,6 +1815,10 @@ fn optimize_images(
         .statistics
         .changes
         .sort_by_key(|change| change.object_id);
+    summary
+        .statistics
+        .visual_protections
+        .sort_by_key(|image| image.object_id);
     summary
 }
 
@@ -3154,6 +3400,7 @@ mod tests {
     #[test]
     fn test_classify_image_distinguishes_color_gray_and_monochrome() {
         let monochrome = DecodedImage {
+            jpeg_quantization: None,
             width: 4,
             height: 1,
             channels: 1,
@@ -3162,6 +3409,7 @@ mod tests {
         assert_eq!(classify_image(&monochrome), ImageKind::Monochrome);
 
         let grayscale = DecodedImage {
+            jpeg_quantization: None,
             width: 4,
             height: 1,
             channels: 1,
@@ -3173,6 +3421,7 @@ mod tests {
         assert_eq!(grayscale_plane.len(), 4);
 
         let color = DecodedImage {
+            jpeg_quantization: None,
             width: 2,
             height: 1,
             channels: 3,
@@ -3184,6 +3433,7 @@ mod tests {
     #[test]
     fn cpu_fallback_preserves_pixels_dimensions_and_monochrome_row_padding() {
         let image = DecodedImage {
+            jpeg_quantization: None,
             width: 9,
             height: 2,
             channels: 3,
@@ -3209,6 +3459,7 @@ mod tests {
     #[test]
     fn cpu_fallback_downsamples_large_scans_and_gpu_output_is_used() {
         let image = DecodedImage {
+            jpeg_quantization: None,
             width: 2400,
             height: 1200,
             channels: 1,
@@ -3229,6 +3480,90 @@ mod tests {
         assert!(gpu);
         assert_eq!((width, height), (2000, 1000));
         assert!(pixels.iter().all(|v| *v == 122));
+    }
+
+    #[test]
+    fn jpeg_huffman_optimization_reduces_scan_size_without_changing_decoded_pixels() {
+        // Odd dimensions exercise edge blocks; RGB includes fine colored marks.
+        let (width, height) = (257u16, 131u16);
+        for channels in [1, 3] {
+            let mut pixels = Vec::new();
+            for y in 0..height {
+                for x in 0..width {
+                    let value = if y % 24 < 12 && x % 16 < 9 { 24 } else { 248 };
+                    if channels == 1 {
+                        pixels.push(value);
+                    } else if x % 31 == 0 {
+                        pixels.extend_from_slice(&[210, 35, 60]);
+                    } else {
+                        pixels.extend_from_slice(&[value; 3]);
+                    }
+                }
+            }
+            for quality in [1, 40, 80, 100] {
+                let optimized = encode_jpeg(
+                    &pixels,
+                    u32::from(width),
+                    u32::from(height),
+                    channels,
+                    quality,
+                )
+                .unwrap();
+                let mut fixed = Vec::new();
+                let mut encoder = JpegEncoder::new(&mut fixed, quality);
+                encoder.set_sampling_factor(SamplingFactor::F_1_1);
+                encoder.set_optimized_huffman_tables(false);
+                encoder
+                    .encode(
+                        &pixels,
+                        width,
+                        height,
+                        if channels == 1 {
+                            JpegColorType::Luma
+                        } else {
+                            JpegColorType::Rgb
+                        },
+                    )
+                    .unwrap();
+                let decode = |bytes: &[u8]| {
+                    image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg).unwrap()
+                };
+                let decoded = decode(&optimized);
+                assert_eq!(
+                    (decoded.width(), decoded.height()),
+                    (u32::from(width), u32::from(height))
+                );
+                assert_eq!(
+                    decoded,
+                    decode(&fixed),
+                    "channels={channels}, quality={quality}"
+                );
+                if quality == 80 {
+                    assert!(
+                        optimized.len() < fixed.len(),
+                        "Huffman optimization must reduce the scan fixture"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn jpeg_huffman_optimization_handles_single_pixel_and_invalid_inputs() {
+        for (pixels, channels) in [(vec![127], 1), (vec![251, 21, 21], 3)] {
+            let jpeg = encode_jpeg(&pixels, 1, 1, channels, 80).unwrap();
+            let decoded =
+                image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (1, 1));
+        }
+        assert!(encode_jpeg(&[], 0, 1, 1, 80).is_none());
+        assert!(encode_jpeg(&[], 1, 0, 1, 80).is_none());
+        assert!(encode_jpeg(&[], 65536, 1, 1, 80).is_none());
+        assert!(encode_jpeg(&[], 1, 65536, 1, 80).is_none());
+        assert!(encode_jpeg(&[0, 0], 1, 1, 2, 80).is_none());
+        assert!(encode_jpeg(&[0, 0], 1, 1, 3, 80).is_none());
+        assert!(encode_jpeg(&[0], 1, 1, 1, 0).is_none());
+        assert!(encode_jpeg(&[0], 1, 1, 1, 101).is_none());
     }
 
     fn advanced_image_fixture(channels: u8) -> (Stream, DecodedImage) {
@@ -3264,12 +3599,172 @@ mod tests {
         (
             stream,
             DecodedImage {
+                jpeg_quantization: None,
                 width: 256,
                 height: 128,
                 channels,
                 pixels,
             },
         )
+    }
+
+    #[test]
+    fn visual_protection_overrides_destructive_settings_and_preserves_stricter_choices() {
+        let (stream, image) = advanced_image_fixture(3);
+        let aggressive = ImageCompressionOptions {
+            gpu_acceleration: false,
+            jpeg_quality: 40,
+            max_long_edge: 128,
+            allow_color_to_gray: true,
+            color_pixel_percent: 100.0,
+            grayscale_reduction: ColorReduction::Monochrome,
+            color_reduction: ColorReduction::Levels2,
+            ..Default::default()
+        };
+        let (effective, reason) = visual_image_options(&image, aggressive, false);
+        assert!(reason.unwrap().contains("连续色调"));
+        let prepared =
+            transformed_stream(&stream, &image, classify_image(&image), effective).unwrap();
+        assert_eq!(
+            (effective.jpeg_quality, effective.max_long_edge),
+            (90, 3000)
+        );
+        assert_eq!((prepared.change.width, prepared.change.height), (256, 128));
+        assert_eq!(prepared.change.bits_per_pixel, 24);
+        assert!(
+            !prepared.change.color_converted
+                && !prepared.change.binarized
+                && !prepared.change.quantized
+        );
+        let stricter = ImageCompressionOptions {
+            jpeg_enabled: false,
+            jpeg_quality: 98,
+            downsample: false,
+            max_long_edge: 8000,
+            ..aggressive
+        };
+        let (effective, _) = visual_image_options(&image, stricter, true);
+        assert!(!effective.jpeg_enabled && !effective.downsample);
+        assert_eq!(
+            (effective.jpeg_quality, effective.max_long_edge),
+            (98, 8000)
+        );
+        let prepared =
+            transformed_stream(&stream, &image, classify_image(&image), effective).unwrap();
+        assert_eq!(
+            prepared.stream.decompressed_content().unwrap(),
+            image.pixels
+        );
+        let (effective, reason) = visual_image_options(
+            &image,
+            ImageCompressionOptions {
+                protect_visual_images: false,
+                ..aggressive
+            },
+            true,
+        );
+        assert!(reason.is_none());
+        assert_eq!(effective.jpeg_quality, 40);
+        let prepared =
+            transformed_stream(&stream, &image, classify_image(&image), effective).unwrap();
+        assert!(
+            prepared.change.downsampled
+                && prepared.change.color_converted
+                && prepared.change.binarized
+        );
+        let restored: ImageCompressionOptions = serde_json::from_str("{}").unwrap();
+        assert!(restored.protect_visual_images);
+    }
+
+    #[test]
+    fn cover_context_tracks_painted_nested_and_shared_images_not_unused_resources() {
+        let (mut doc, page) = cropped_page_document();
+        let (mut cover, _) = advanced_image_fixture(1);
+        cover.dict.set("Subtype", "Image");
+        let cover = doc.add_object(cover.clone());
+        let unused = doc.add_object(doc.get_object(cover).unwrap().clone());
+        let form = doc.add_object(Stream::new(
+            dictionary! {"Subtype" => "Form",
+            "Resources" => dictionary! {"XObject" => dictionary! {"Cover" => cover}}},
+            b"/Cover Do".to_vec(),
+        ));
+        let resources = doc
+            .add_object(dictionary! {"XObject" => dictionary! {"Fm" => form, "Unused" => unused}});
+        let contents = doc.add_object(Stream::new(Dictionary::new(), b"/Fm Do".to_vec()));
+        let template = doc.get_dictionary(page).unwrap().clone();
+        let mut pages = Vec::new();
+        for _ in 0..12 {
+            let mut p = template.clone();
+            p.set("Resources", resources);
+            p.set("Contents", contents);
+            pages.push(doc.add_object(p));
+        }
+        assert_eq!(boundary_image_ids(&doc, &pages), BTreeSet::from([cover]));
+        // An unpainted image in a shared dictionary must not become a cover.
+        assert!(referenced_image_ids(&doc, &pages).contains(&unused));
+        let shared = process_image_with_context(
+            &doc,
+            cover,
+            ImageCompressionOptions {
+                gpu_acceleration: false,
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(shared.visual_protection.unwrap().reason.contains("首尾页"));
+        let blank = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
+        for (i, &id) in pages.iter().enumerate() {
+            if i != 5 {
+                doc.get_dictionary_mut(id).unwrap().set("Contents", blank);
+            }
+        }
+        assert!(boundary_image_ids(&doc, &pages).is_empty());
+        // In a short document the middle page is not presumed to be a cover.
+        assert!(boundary_image_ids(&doc, &pages[4..7]).is_empty());
+    }
+
+    #[test]
+    fn visual_protection_reports_retained_originals_and_discarded_outputs() {
+        let (mut doc, page) = image_statistics_fixture();
+        let mut summary = optimize_images(
+            &mut doc,
+            &[page],
+            ImageCompressionOptions {
+                gpu_acceleration: false,
+                ..Default::default()
+            },
+            &mut |_, _| {},
+        );
+        assert!(!summary.statistics.visual_protections.is_empty());
+        assert!(summary
+            .statistics
+            .visual_protections
+            .iter()
+            .any(|p| !p.retained_original));
+        summary.statistics.discard_changes();
+        assert!(summary
+            .statistics
+            .visual_protections
+            .iter()
+            .all(|p| p.retained_original));
+        // A tiny original stream cannot meet the saving threshold, but its
+        // protection decision must still be visible in the report.
+        let (stream, _) = advanced_image_fixture(1);
+        let id = doc.add_object(stream);
+        let result = process_image_with_context(
+            &doc,
+            id,
+            ImageCompressionOptions {
+                gpu_acceleration: false,
+                ..Default::default()
+            },
+            true,
+        );
+        assert!(result.visual_protection.is_some());
+        assert_eq!(
+            result.visual_protection.unwrap().retained_original,
+            result.transform.is_none()
+        );
     }
 
     // Synthetic 8 x 4 lossless JP2 fixtures: four gray levels and RGB primaries.
@@ -3669,6 +4164,7 @@ mod tests {
             &[page],
             ImageCompressionOptions {
                 gpu_acceleration: false,
+                protect_visual_images: false,
                 allow_color_to_gray: true,
                 color_pixel_percent: 100.0,
                 grayscale_reduction: ColorReduction::Mild,
@@ -3732,6 +4228,7 @@ mod tests {
             &[page],
             ImageCompressionOptions {
                 gpu_acceleration: false,
+                protect_visual_images: false,
                 allow_color_to_gray: true,
                 color_pixel_percent: 100.0,
                 grayscale_reduction: ColorReduction::Aggressive,
@@ -3916,6 +4413,7 @@ mod tests {
     fn advanced_color_conversion_requires_permission_and_obeys_both_thresholds() {
         let (original, _) = advanced_image_fixture(3);
         let image = DecodedImage {
+            jpeg_quantization: None,
             width: 256,
             height: 128,
             channels: 3,
@@ -3956,6 +4454,7 @@ mod tests {
     fn advanced_conversion_off_preserves_faint_color_on_neutral_scans() {
         let (original, _) = advanced_image_fixture(3);
         let image = DecodedImage {
+            jpeg_quantization: None,
             width: 256,
             height: 128,
             channels: 3,
@@ -4033,6 +4532,7 @@ mod tests {
         }
         // Near-monochrome 8-bit input must retain gray edge pixels at every numeric level.
         let image = DecodedImage {
+            jpeg_quantization: None,
             width: 256,
             height: 128,
             channels: 1,

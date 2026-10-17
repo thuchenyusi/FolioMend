@@ -79,6 +79,7 @@ jobs:
           Copy-Item src-tauri/target/x86_64-pc-windows-msvc/release/foliomend.exe "$stage/FolioMend.exe"
           Copy-Item README.md "$stage/README.md"
           Copy-Item LICENSE "$stage/LICENSE"
+          Copy-Item THIRD_PARTY_NOTICES.md "$stage/THIRD_PARTY_NOTICES.md"
           @'
           FolioMend Windows x64 Portable
 

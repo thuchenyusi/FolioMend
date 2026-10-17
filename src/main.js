@@ -176,11 +176,13 @@ const imageSettingsForm = document.getElementById("image-settings-form");
 const btnImageSettings = document.getElementById("btn-image-settings");
 const defaultImageOptions = Object.freeze({
     gpuAcceleration: true,
+    protectVisualImages: true,
     jpegEnabled: true, jpegQuality: 80, downsample: true, maxLongEdge: 2000,
     allowColorToGray: false, colorDifference: 20, colorPixelPercent: 5,
     grayscaleReduction: "preserve", colorReduction: "preserve",
 });
 const imageFields = {
+    protectVisualImages: document.getElementById("advanced-protect-visual"),
     jpegEnabled: document.getElementById("advanced-jpeg-enabled"),
     jpegQuality: document.getElementById("advanced-jpeg-quality"),
     downsample: document.getElementById("advanced-downsample"),
@@ -264,6 +266,7 @@ function updateImageSettingsSummary() {
     const pieces = [imageOptions.jpegEnabled ? `JPEG 质量 ${imageOptions.jpegQuality}` : "无损编码",
         imageOptions.downsample ? `长边 ${imageOptions.maxLongEdge} px` : "原始分辨率",
         imageOptions.allowColorToGray ? "允许转灰度" : "保留彩色"];
+    if (imageOptions.protectVisualImages) pieces.push("封面／图片保护");
     if (imageOptions.grayscaleReduction !== "preserve") pieces.push(reductionLabel("grayscaleReduction", imageOptions.grayscaleReduction));
     if (imageOptions.colorReduction !== "preserve") pieces.push(`彩色 ${reductionLabel("colorReduction", imageOptions.colorReduction)}`);
     document.getElementById("image-settings-summary").textContent = optionCompressImages.checked
@@ -624,6 +627,8 @@ function renderImageReport(result, options) {
     const stats = result.image_statistics;
     const settings = result.image_settings || options.imageCompression;
     const changes = stats?.changes || [];
+    const protections = stats?.visual_protections || [];
+    const protectionById = new Map(protections.map(item => [item.object_id.join(":"), item]));
     const classification = `输入识别：彩色 ${formatCount(result.color_images)} · 灰度 ${formatCount(result.grayscale_images)} · 纯黑白 ${formatCount(result.monochrome_images)}`;
     if (!stats) return `<p>${classification} · 已压缩 ${formatCount(result.optimized_images)} · 跳过 ${formatCount(result.skipped_images)}</p>`;
     if (!stats.total_images) return '<section class="image-report"><h4>图像优化</h4><p>未发现可引用的扫描图像。</p></section>';
@@ -652,18 +657,26 @@ function renderImageReport(result, options) {
         `黑白／灰度：${reductionLabel("grayscaleReduction", settings.grayscaleReduction)}`,
         `彩色：${reductionLabel("colorReduction", settings.colorReduction)}`,
         settings.allowColorToGray ? `转灰度：彩色比例 ≤ ${settings.colorPixelPercent}%，差异阈值 ${settings.colorDifference}` : "关闭彩色转灰度",
+        settings.protectVisualImages ? "封面／图片保护开启（触发时采用更保守参数）" : "封面／图片保护关闭",
     ].map(escapeHtml).join(" · ") : "";
     const rows = changes.map(change => {
         const actions = [change.color_converted && "转灰度", change.binarized && "二值化", change.quantized && "量化", change.downsampled && "缩小"].filter(Boolean);
         const automatic = change.adaptive_reduction;
+        const protection = protectionById.get(change.object_id.join(":"));
+        const protectionText = protection ? `<small>保护：${escapeHtml(protection.reason)}</small>` : "";
         const adaptiveText = automatic ? `<small>自动 → ${escapeHtml(adaptiveReductionLabel(automatic))} · ${escapeHtml(automatic.reason)}</small>` : "";
         const encoding = change.encoding === "DCTDecode" ? "JPEG" : "Flate";
         const sampled = change.color_converted || change.binarized || change.quantized
             ? `${formatCount(change.sampled_colors_before)} → ${formatCount(change.sampled_colors_after)}` : "—";
         return `<tr><td>${formatCount(change.object_id[0])} ${formatCount(change.object_id[1])} R</td>
-            <td>${actions.join("、") || "重新编码"}<small>${encoding} · ${change.original_bits_per_pixel} → ${change.bits_per_pixel} bit/像素</small>${adaptiveText}</td>
+            <td>${actions.join("、") || "重新编码"}<small>${encoding} · ${change.original_bits_per_pixel} → ${change.bits_per_pixel} bit/像素</small>${adaptiveText}${protectionText}</td>
             <td>${change.original_width} × ${change.original_height}<small>→ ${change.width} × ${change.height}</small></td>
             <td>${sampled}</td><td>${formatBytes(change.original_bytes)} → ${formatBytes(change.output_bytes)}<small>${reductionText(change.original_bytes, change.output_bytes)}</small></td></tr>`;
+    }).join("");
+    const protectionRows = protections.map(item => {
+        const policy = [item.jpeg_quality == null ? "无损 Flate" : `JPEG ${item.jpeg_quality}`,
+            item.max_long_edge == null ? "原始分辨率" : `长边 ≤ ${item.max_long_edge} px`, "保留颜色与灰阶"];
+        return `<tr><td>${formatCount(item.object_id[0])} ${formatCount(item.object_id[1])} R</td><td>${escapeHtml(item.reason)}</td><td>${escapeHtml(policy.join(" · "))}</td><td>${item.retained_original ? "保留原图" : "已按保护参数压缩"}</td></tr>`;
     }).join("");
     return `<section class="image-report" aria-label="图像优化统计">
         <h4>图像优化 · 实际结果</h4>
@@ -673,6 +686,7 @@ function renderImageReport(result, options) {
             <div><span>图像像素</span><strong>${reductionText(stats.original_pixels, stats.output_pixels)}</strong><small>${formatCount(stats.original_pixels / 1e6)} → ${formatCount(stats.output_pixels / 1e6)} 百万像素</small></div>
         </div>
         <p class="image-report-types">${classification}</p>
+        ${protections.length ? `<details class="image-change-details"><summary>封面／图片保护：${formatCount(protections.length)} 张（含保留原图 ${formatCount(protections.filter(item => item.retained_original).length)} 张）</summary><p class="image-report-note">首尾页位置和连续色调区域为启发式判断，可能包含正文页；共享图像在任一首尾页出现时统一采用保护参数。普通线条插图仍可能使用正文参数。</p><div class="image-table-scroll" tabindex="0" role="region" aria-label="封面与图片保护明细"><table class="image-change-table"><thead><tr><th scope="col">图像对象</th><th scope="col">判断依据</th><th scope="col">候选压缩参数</th><th scope="col">结果</th></tr></thead><tbody>${protectionRows}</tbody></table></div></details>` : ""}
         <dl class="image-actions">${actionCounts.map(([label, count]) => `<div><dt>${label}</dt><dd>${formatCount(count)} 张</dd></div>`).join("")}</dl>
         ${colors.length ? `<p class="palette-summary">颜色处理 ${formatCount(colors.length)} 张 · 每张平均采样颜色 <strong>${formatCount(beforeColors / colors.length)} → ${formatCount(afterColors / colors.length)}</strong>（${reductionText(beforeColors, afterColors)}）</p>` : '<p class="palette-summary">没有实际写回的减色或颜色转换；保留颜色层次仍可通过缩小和重新编码节省体积。</p>'}
         ${reasons.length ? `<p class="retention-reasons"><strong>保留原图原因：</strong>${reasons.map(([reason, count]) => `${reason} ${formatCount(count)} 张`).join("；")}</p>` : ""}

@@ -24,6 +24,7 @@ lopdf = "0.34"
 flate2 = "1.1"
 weezl = "0.1.12"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+jpeg-encoder = "0.7.1"
 wgpu = { version = "26", default-features = false, features = ["std", "dx12", "metal", "vulkan", "wgsl"] }
 pollster = "0.4"
 hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = ["std", "simd"] }
