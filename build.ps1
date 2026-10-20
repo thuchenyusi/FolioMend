@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+﻿#!/usr/bin/env pwsh
 # FolioMend 构建脚本
 # 用法: .\build.ps1 [-Dev] [-Release]
 

@@ -99,6 +99,8 @@ npm run dev
 
 也可以使用 PowerShell 构建脚本：
 
+脚本兼容 Windows PowerShell 5.1 和 PowerShell 7。编辑 `build.ps1` 时请保留 **UTF-8 with BOM** 编码，否则 Windows PowerShell 5.1 可能将中文误读为本地编码，导致乱码及“字符串缺少终止符”等解析错误。
+
 ```powershell
 .\build.ps1 -Dev
 ```
