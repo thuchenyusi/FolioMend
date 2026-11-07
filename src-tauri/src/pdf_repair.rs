@@ -1,5 +1,21 @@
 use lopdf::{Document, ObjectId};
 
+/// lopdf decrypts empty-password PDFs while loading, before unpacking object
+/// streams, but retains /Encrypt. Never call decrypt again on that plaintext.
+pub fn remove_empty_password_encryption(doc: &mut Document) -> Result<bool, String> {
+    if !doc.trailer.has(b"Encrypt") {
+        return Ok(false);
+    }
+    if doc.encryption_state.is_none() {
+        return Err(
+            "PDF 已加密，无法使用空密码解密；文件需要非空密码，或使用了不支持的加密方式".into(),
+        );
+    }
+    doc.trailer.remove(b"Encrypt");
+    doc.encryption_state = None;
+    Ok(true)
+}
+
 struct XrefEntry {
     id: ObjectId,
     offset: usize,

@@ -692,7 +692,12 @@ fn update_destination_coordinates(
 
 #[cfg(test)]
 fn image_filter_names(stream: &Stream) -> Vec<String> {
-    stream.filters().unwrap_or_default()
+    stream
+        .filters()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect()
 }
 
 fn image_color_space(doc: &Document, stream: &Stream) -> Option<Vec<u8>> {
@@ -718,6 +723,8 @@ fn decode_jpx_image(
     height: u32,
     content: &[u8],
 ) -> Option<DecodedImage> {
+    let color_space = image_color_space(doc, stream);
+    let has_explicit_color_space = stream.dict.has(b"ColorSpace");
     // A decoder error or panic must leave the original image intact.
     std::panic::catch_unwind(|| {
         use hayro_jpeg2000::{ColorSpace, DecodeSettings, DecoderContext, Image};
@@ -730,10 +737,10 @@ fn decode_jpx_image(
         {
             return None;
         }
-        let channels = match image_color_space(doc, stream).as_deref() {
+        let channels = match color_space.as_deref() {
             Some(b"DeviceGray") => 1,
             Some(b"DeviceRGB") => 3,
-            None if stream.dict.get(b"ColorSpace").is_err() => match image.color_space() {
+            None if !has_explicit_color_space => match image.color_space() {
                 ColorSpace::Gray => 1,
                 ColorSpace::RGB => 3,
                 _ => return None,
@@ -2236,7 +2243,24 @@ pub fn process_pdf_with_bookmark_confirmation(
 
     // 完整加载并重写文档，避免增量保存把旧图像字节继续保留在输出中。
     let mut pdf_repaired = false;
-    let loaded = Document::load(path).and_then(|doc| {
+    let mut encryption_removed = false;
+    let loaded = Document::load(path);
+    // Check encryption before checking the page tree: it may live inside an
+    // encrypted object stream. Password failures are not index corruption.
+    let loaded = match loaded {
+        Ok(mut doc) => {
+            match crate::pdf_repair::remove_empty_password_encryption(&mut doc) {
+                Ok(removed) => encryption_removed = removed,
+                Err(error) => {
+                    result.error = Some(error);
+                    return result;
+                }
+            }
+            Ok(doc)
+        }
+        Err(error) => Err(error),
+    };
+    let loaded = loaded.and_then(|doc| {
         // lopdf may return a partial document when object offsets are wrong.
         doc.catalog()?;
         if doc.get_pages().is_empty() {
@@ -2271,6 +2295,24 @@ pub fn process_pdf_with_bookmark_confirmation(
             return result;
         }
     };
+
+    // The index-repair path loads a fresh document and must also remove the
+    // encryption marker before any output is written.
+    match crate::pdf_repair::remove_empty_password_encryption(&mut doc) {
+        Ok(removed) => encryption_removed |= removed,
+        Err(error) => {
+            result.error = Some(error);
+            return result;
+        }
+    }
+    if encryption_removed {
+        result.pdf_repair_status = if pdf_repaired {
+            "已修复 PDF 索引；已自动移除空密码加密"
+        } else {
+            "已自动移除空密码加密"
+        }
+        .to_string();
+    }
 
     let mut bookmarks_repaired = false;
     if options.repair_bookmarks {
@@ -2414,7 +2456,8 @@ pub fn process_pdf_with_bookmark_confirmation(
             .iter()
             .any(|&width| (width - target_width).abs() >= 0.01);
     let needs_page_geometry_change = needs_page_normalization || has_true_crop_work;
-    let needs_modification = pdf_repaired
+    let needs_modification = encryption_removed
+        || pdf_repaired
         || needs_page_geometry_change
         || result.optimized_images > 0
         || bookmarks_repaired
@@ -2478,7 +2521,8 @@ pub fn process_pdf_with_bookmark_confirmation(
                 .unwrap_or(0);
 
             // A compression-only run must never leave the user with a larger file.
-            if !pdf_repaired
+            if !encryption_removed
+                && !pdf_repaired
                 && !needs_page_geometry_change
                 && !bookmarks_repaired
                 && result.bookmarks_fit_width == 0
@@ -3906,11 +3950,7 @@ mod tests {
     fn hex_wrapper(mut stream: Stream) -> Stream {
         let filters = stream.filters().unwrap();
         let names = std::iter::once(Object::Name(b"ASCIIHexDecode".to_vec()))
-            .chain(
-                filters
-                    .into_iter()
-                    .map(|name| Object::Name(name.into_bytes())),
-            )
+            .chain(filters.into_iter().map(|name| Object::Name(name.to_vec())))
             .collect::<Vec<_>>();
         stream.content = stream
             .content
