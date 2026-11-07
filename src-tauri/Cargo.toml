@@ -20,7 +20,7 @@ log = "0.4"
 tauri = { version = "~2.12.1", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
-lopdf = "0.38"
+lopdf = "0.42"
 flate2 = "1.1"
 weezl = "0.1.12"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
