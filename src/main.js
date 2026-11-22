@@ -30,11 +30,12 @@ const optionsGrid = document.getElementById("options-grid");
 const optionOverwriteOriginal = document.getElementById("option-overwrite-original");
 optionOverwriteOriginal.addEventListener("change", () => {
     document.getElementById("output-mode-note").textContent = optionOverwriteOriginal.checked
-        ? "原位覆盖，不保留原文件副本" : "另存副本，保留原文件";
+        ? "原位覆盖，不保留原文件副本" : "另存 _modified 副本，保留原文件";
 });
 
 for (const label of optionsGrid.querySelectorAll(".check-option")) {
-    label.title = label.querySelector("small").textContent;
+    const description = label.querySelector("small");
+    if (description) label.title = description.textContent;
 }
 optionHelp.addEventListener("click", () => {
     const expanded = optionsGrid.classList.toggle("show-descriptions");
@@ -136,6 +137,19 @@ document.addEventListener("scroll", (event) => {
 }, true);
 window.addEventListener("resize", closeHelp);
 
+function bindSettingsDialog(dialog, opener) {
+    for (const button of dialog.querySelectorAll("[data-close-dialog]")) {
+        button.addEventListener("click", () => dialog.close());
+    }
+    dialog.addEventListener("close", () => opener.focus());
+    dialog.addEventListener("click", (event) => {
+        if (event.target !== dialog) return;
+        const bounds = dialog.getBoundingClientRect();
+        if (event.clientX < bounds.left || event.clientX > bounds.right
+            || event.clientY < bounds.top || event.clientY > bounds.bottom) dialog.close();
+    });
+}
+
 function showWorkspace(view) {
     closeHelp();
     const showFiles = view === "files";
@@ -175,7 +189,6 @@ btnResultsCollapseAll.addEventListener("click", () => {
     for (const file of resultsList.querySelectorAll("details.result-item")) file.open = false;
 });
 const optionCompressImages = document.getElementById("option-compress-images");
-const optionGpuAcceleration = document.getElementById("option-gpu-acceleration");
 const imageSettingsDialog = document.getElementById("image-settings-dialog");
 const imageSettingsForm = document.getElementById("image-settings-form");
 const btnImageSettings = document.getElementById("btn-image-settings");
@@ -188,6 +201,7 @@ const defaultImageOptions = Object.freeze({
     grayscaleReduction: "preserve", colorReduction: "preserve",
 });
 const imageFields = {
+    gpuAcceleration: document.getElementById("advanced-gpu-acceleration"),
     protectVisualImages: document.getElementById("advanced-protect-visual"),
     removePaperBackground: document.getElementById("advanced-remove-paper"),
     paperWhitePoint: document.getElementById("advanced-paper-white-point"),
@@ -264,13 +278,7 @@ try {
         if (validStoredImageOption(key, value)) imageOptions[key] = value;
     }
 } catch (_) {}
-optionGpuAcceleration.checked = imageOptions.gpuAcceleration;
-optionGpuAcceleration.addEventListener("change", () => {
-    imageOptions.gpuAcceleration = optionGpuAcceleration.checked;
-    try { localStorage.setItem("imageCompression", JSON.stringify(imageOptions)); } catch (_) {}
-});
 function updateImageSettingsSummary() {
-    optionGpuAcceleration.disabled = isProcessing || !optionCompressImages.checked;
     const pieces = [imageOptions.jpegEnabled ? `JPEG 质量 ${imageOptions.jpegQuality}` : "无损编码",
         imageOptions.downsample ? `长边 ${imageOptions.maxLongEdge} px` : "原始分辨率",
         imageOptions.allowColorToGray ? "允许转灰度" : "保留彩色"];
@@ -304,16 +312,8 @@ btnImageSettings.addEventListener("click", () => {
     fillImageSettings(imageOptions);
     imageSettingsDialog.showModal();
 });
-for (const id of ["btn-image-settings-close", "btn-image-settings-cancel"]) {
-    document.getElementById(id).addEventListener("click", () => imageSettingsDialog.close());
-}
+bindSettingsDialog(imageSettingsDialog, btnImageSettings);
 document.getElementById("btn-image-settings-reset").addEventListener("click", () => fillImageSettings(defaultImageOptions));
-imageSettingsDialog.addEventListener("close", () => btnImageSettings.focus());
-imageSettingsDialog.addEventListener("click", (event) => {
-    if (event.target !== imageSettingsDialog) return;
-    const bounds = imageSettingsDialog.getBoundingClientRect();
-    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) imageSettingsDialog.close();
-});
 jpegSlider.addEventListener("input", () => { imageFields.jpegQuality.value = jpegSlider.value; });
 imageFields.jpegQuality.addEventListener("input", () => {
     if (imageFields.jpegQuality.validity.valid) jpegSlider.value = imageFields.jpegQuality.value;
@@ -337,21 +337,55 @@ optionCompressImages.addEventListener("change", updateImageSettingsSummary);
 updateImageSettingsSummary();
 
 const optionNormalizePages = document.getElementById("option-normalize-pages");
-const optionRepairPdf = document.getElementById("option-repair-pdf");
-const optionRepairStructureTags = document.getElementById("option-repair-structure-tags");
-try { optionRepairStructureTags.checked = localStorage.getItem("repairStructureTags") === "true"; } catch (_) {}
-optionRepairStructureTags.addEventListener("change", () => {
-    try { localStorage.setItem("repairStructureTags", String(optionRepairStructureTags.checked)); } catch (_) {}
+const optionDocumentRepair = document.getElementById("option-document-repair");
+const repairSettingsDialog = document.getElementById("repair-settings-dialog");
+const repairSettingsForm = document.getElementById("repair-settings-form");
+const btnRepairSettings = document.getElementById("btn-repair-settings");
+const repairSettingsSummary = document.getElementById("repair-settings-summary");
+const repairFields = {
+    repairPdf: document.getElementById("option-repair-pdf"),
+    repairStructureTags: document.getElementById("option-repair-structure-tags"),
+    repairBookmarks: document.getElementById("option-repair-bookmarks"),
+};
+const repairOptions = { repairPdf: true, repairStructureTags: true, repairBookmarks: true };
+try {
+    optionDocumentRepair.checked = localStorage.getItem("documentRepair") !== "false";
+    for (const key of Object.keys(repairOptions)) {
+        repairOptions[key] = localStorage.getItem(key) !== "false";
+    }
+} catch (_) {}
+
+function updateRepairControls() {
+    const enabledCount = Object.values(repairOptions).filter(Boolean).length;
+    repairSettingsSummary.textContent = optionDocumentRepair.checked ? `已启用 ${enabledCount} 项修复` : "已关闭";
+    optionDocumentRepair.disabled = isProcessing;
+    btnRepairSettings.disabled = isProcessing;
+}
+
+optionDocumentRepair.addEventListener("change", () => {
+    try { localStorage.setItem("documentRepair", String(optionDocumentRepair.checked)); } catch (_) {}
+    updateRepairControls();
 });
-try { optionRepairPdf.checked = localStorage.getItem("repairPdf") !== "false"; } catch (_) {}
-optionRepairPdf.addEventListener("change", () => {
-    try { localStorage.setItem("repairPdf", String(optionRepairPdf.checked)); } catch (_) {}
+btnRepairSettings.addEventListener("click", () => {
+    if (isProcessing) return;
+    closeHelp();
+    for (const [key, field] of Object.entries(repairFields)) field.checked = repairOptions[key];
+    repairSettingsDialog.showModal();
 });
-const optionRepairBookmarks = document.getElementById("option-repair-bookmarks");
-try { optionRepairBookmarks.checked = localStorage.getItem("repairBookmarks") !== "false"; } catch (_) {}
-optionRepairBookmarks.addEventListener("change", () => {
-    try { localStorage.setItem("repairBookmarks", String(optionRepairBookmarks.checked)); } catch (_) {}
+bindSettingsDialog(repairSettingsDialog, btnRepairSettings);
+repairSettingsForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    for (const [key, field] of Object.entries(repairFields)) repairOptions[key] = field.checked;
+    try {
+        for (const [key, enabled] of Object.entries(repairOptions)) {
+            localStorage.setItem(key, String(enabled));
+        }
+    } catch (_) {}
+    updateRepairControls();
+    repairSettingsDialog.close();
 });
+updateRepairControls();
+
 const optionFitBookmarks = document.getElementById("option-fit-bookmarks");
 try { optionFitBookmarks.checked = localStorage.getItem("fitBookmarksToWidth") === "true"; } catch (_) {}
 optionFitBookmarks.addEventListener("change", () => {
@@ -376,7 +410,7 @@ function updateWidthOptions() {
     customWidth.value = isCustom ? rememberedCustomWidth : "";
     customWidth.placeholder = isCustom ? "例如 595.28" : "自动识别";
     widthModeHint.textContent = !optionNormalizePages.checked
-        ? "开启“统一页面宽度”后，可设置目标宽度。"
+        ? "开启“统一页宽”后，可设置目标宽度。"
         : isCustom
             ? "本批次全部 PDF 使用同一宽度；A4 短边约 595.28 pt。"
             : "为每个 PDF 分别识别合适的宽度，自动排除异常宽页的影响。";
@@ -403,9 +437,9 @@ function getProcessingOptions() {
             ? customWidth.valueAsNumber
             : null,
         cropMode: cropMode.value,
-        repairPdf: optionRepairPdf.checked,
-        repairStructureTags: optionRepairStructureTags.checked,
-        repairBookmarks: optionRepairBookmarks.checked,
+        repairPdf: optionDocumentRepair.checked && repairOptions.repairPdf,
+        repairStructureTags: optionDocumentRepair.checked && repairOptions.repairStructureTags,
+        repairBookmarks: optionDocumentRepair.checked && repairOptions.repairBookmarks,
         fitBookmarksToWidth: optionFitBookmarks.checked,
     };
 }
@@ -558,9 +592,7 @@ btnProcess.addEventListener("click", async () => {
     updateImageSettingsSummary();
     optionNormalizePages.disabled = true;
     cropMode.disabled = true;
-    optionRepairPdf.disabled = true;
-    optionRepairStructureTags.disabled = true;
-    optionRepairBookmarks.disabled = true;
+    updateRepairControls();
     optionFitBookmarks.disabled = true;
     optionOverwriteOriginal.disabled = true;
     showWorkspace("files");
@@ -625,9 +657,7 @@ btnProcess.addEventListener("click", async () => {
         updateImageSettingsSummary();
         optionNormalizePages.disabled = false;
         cropMode.disabled = false;
-        optionRepairPdf.disabled = false;
-        optionRepairStructureTags.disabled = false;
-        optionRepairBookmarks.disabled = false;
+        updateRepairControls();
         optionFitBookmarks.disabled = false;
         optionOverwriteOriginal.disabled = false;
         updateWidthOptions();
@@ -785,7 +815,7 @@ function showResults(results) {
                 PDF 自动修复：${escapeHtml(r.pdf_repair_status || "未启用")}<br>
                 结构标签修复：${escapeHtml(r.structure_tag_status || "未启用")}<br>
                 书签检测：${escapeHtml(r.bookmark_status || "未启用")}<br>
-                ${options.fitBookmarksToWidth ? `书签适合宽度：已更新 ${r.bookmarks_fit_width || 0}，跳过 ${r.bookmarks_fit_width_skipped || 0}（外部链接或无法解析的目标）<br>` : ""}
+                ${options.fitBookmarksToWidth ? `统一书签缩放：已更新 ${r.bookmarks_fit_width || 0}，跳过 ${r.bookmarks_fit_width_skipped || 0}（外部链接或无法解析的目标）<br>` : ""}
                 ${sizeDetail}
                 输出文件: ${escapeHtml(r.output_path)}
             `;

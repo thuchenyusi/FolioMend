@@ -71,10 +71,10 @@
                     <section class="option-category category-pages" aria-labelledby="pages-title">
                         <div class="category-heading">
                             <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></span>
-                            <div><h3 id="pages-title">页面与尺寸</h3><p>统一显示宽度，调整可见区域</p></div>
+                            <h3 id="pages-title">统一化</h3>
                         </div>
                         <label class="check-option">
-                            <span><strong>统一页面宽度</strong><small>按可见区域等比缩放，让不同页面保持一致的阅读宽度</small></span>
+                            <span><strong>统一页宽</strong><small>按可见区域等比缩放，让不同页面保持一致的阅读宽度</small></span>
                             <input id="option-normalize-pages" type="checkbox" role="switch" checked>
                         </label>
                         <div class="page-settings">
@@ -110,6 +110,16 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="check-option fit-bookmark-option">
+                            <span>
+                                <span class="option-title">
+                                    <label for="option-fit-bookmarks"><strong>统一书签缩放</strong></label>
+                                    <button class="info-button" type="button" aria-label="统一书签缩放说明" aria-expanded="false" aria-controls="bookmark-fit-help" aria-describedby="bookmark-fit-hint"><span aria-hidden="true">i</span></button>
+                                </span>
+                                <small id="bookmark-fit-description">点击书签后，页面按窗口宽度显示。</small>
+                            </span>
+                            <input id="option-fit-bookmarks" type="checkbox" role="switch" aria-describedby="bookmark-fit-description">
+                        </div>
                     </section>
 
                     <section class="option-category category-images" aria-labelledby="images-title">
@@ -121,75 +131,28 @@
                             <span><strong>压缩 PDF</strong><small>压缩图像并合并完全相同的字体流，图像参数可在高级设置中调整</small></span>
                             <input id="option-compress-images" type="checkbox" role="switch" checked>
                         </label>
-                        <label class="check-option">
-                            <span><strong>GPU 加速</strong><small id="gpu-acceleration-description">加速灰度转换与图像缩小；不可用时自动回退 CPU，关闭后全部使用 CPU</small></span>
-                            <input id="option-gpu-acceleration" type="checkbox" role="switch" aria-describedby="gpu-acceleration-description" checked>
-                        </label>
-                        <div class="advanced-image-entry">
+                        <div class="advanced-settings-entry">
                             <p id="image-settings-summary"></p>
-                            <button id="btn-image-settings" class="btn btn-small" type="button" aria-haspopup="dialog">高级设置 <span aria-hidden="true">↗</span></button>
+                            <button id="btn-image-settings" class="btn btn-small" type="button" aria-label="图像高级设置" aria-haspopup="dialog">高级设置 <span aria-hidden="true">↗</span></button>
                         </div>
                     </section>
 
                     <section class="option-category category-repair" aria-labelledby="repair-title">
                         <div class="category-heading">
                             <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg></span>
-                            <div><h3 id="repair-title">文档修复</h3><p>修复读取异常和结构标签</p></div>
-                        </div>
-                        <div class="check-option">
-                            <span>
-                                <span class="option-title">
-                                    <label for="option-repair-pdf"><strong>自动修复 PDF 索引</strong></label>
-                                    <button class="info-button" type="button" aria-label="PDF 索引修复说明" aria-expanded="false" aria-controls="pdf-repair-help" aria-describedby="pdf-repair-hint"><span aria-hidden="true">i</span></button>
-                                </span>
-                                <small id="pdf-repair-description">读取失败时尝试修复，按所选输出方式保存</small>
-                            </span>
-                            <input id="option-repair-pdf" type="checkbox" role="switch" aria-describedby="pdf-repair-description" checked>
-                        </div>
-                        <div class="check-option">
-                            <span>
-                                <span class="option-title">
-                                    <label for="option-repair-structure-tags"><strong>修复结构标签</strong></label>
-                                    <button class="info-button" type="button" aria-label="结构标签修复说明" aria-expanded="false" aria-controls="structure-tags-help" aria-describedby="structure-tags-hint"><span aria-hidden="true">i</span></button>
-                                </span>
-                                <small id="structure-tags-description">重建可确认的标签索引；完全失效时清理标签，保留画面与 OCR</small>
-                            </span>
-                            <input id="option-repair-structure-tags" type="checkbox" role="switch" aria-describedby="structure-tags-description">
-                        </div>
-                    </section>
-
-                    <section class="option-category category-bookmarks" aria-labelledby="bookmarks-title">
-                        <div class="category-heading">
-                            <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v17l-6-4-6 4V4Z"/></svg></span>
-                            <div><h3 id="bookmarks-title">书签与导航</h3><p>保留目录结构，优化跳转体验</p></div>
-                        </div>
-                        <div class="bookmark-options">
-                            <div class="check-option">
-                                <span>
-                                    <span class="option-title">
-                                        <label for="option-repair-bookmarks"><strong>检测与修复异常书签</strong></label>
-                                        <button class="info-button" type="button" aria-label="异常书签修复说明" aria-expanded="false" aria-controls="bookmark-repair-help" aria-describedby="bookmark-repair-hint"><span aria-hidden="true">i</span></button>
-                                    </span>
-                                    <small id="bookmark-repair-description">优先修复结构，尽量保留现有书签</small>
-                                </span>
-                                <input id="option-repair-bookmarks" type="checkbox" role="switch" aria-describedby="bookmark-repair-description bookmark-cleanup-note" checked>
+                            <h3 id="repair-title"><label for="option-document-repair">文档修复</label></h3>
+                            <div class="check-option repair-toggle">
+                                <input id="option-document-repair" type="checkbox" role="switch" aria-describedby="repair-settings-summary" checked>
                             </div>
-                            <p id="bookmark-cleanup-note" class="consequence-note">如需清理现有书签，会先确认。</p>
-                            <div class="check-option">
-                                <span>
-                                    <span class="option-title">
-                                        <label for="option-fit-bookmarks"><strong>跳转时适合页面宽度</strong></label>
-                                        <button class="info-button" type="button" aria-label="书签跳转显示说明" aria-expanded="false" aria-controls="bookmark-fit-help" aria-describedby="bookmark-fit-hint"><span aria-hidden="true">i</span></button>
-                                    </span>
-                                    <small id="bookmark-fit-description">保留标题、层级与纵向位置，外部链接不受影响</small>
-                                </span>
-                                <input id="option-fit-bookmarks" type="checkbox" role="switch" aria-describedby="bookmark-fit-description">
-                            </div>
+                        </div>
+                        <div class="advanced-settings-entry">
+                            <p id="repair-settings-summary"></p>
+                            <button id="btn-repair-settings" class="btn btn-small" type="button" aria-label="文档修复高级设置" aria-haspopup="dialog">高级设置 <span aria-hidden="true">↗</span></button>
                         </div>
                     </section>
                     <section class="option-category" aria-labelledby="output-title">
                         <div class="category-heading">
-                            <div><h3 id="output-title">输出方式</h3><p>默认另存带后缀的副本</p></div>
+                            <h3 id="output-title">输出方式</h3>
                         </div>
                         <label class="check-option">
                             <span><strong>原位覆盖原文件</strong><small id="overwrite-description">不添加后缀，不保留原文件副本；开始处理前会再次确认</small></span>
@@ -204,7 +167,7 @@
 
     <footer class="action-section">
         <div class="action-inner">
-            <p class="output-note">输出至原文件目录<span id="output-mode-note">另存副本，保留原文件</span></p>
+            <p class="output-note">输出至原文件目录<span id="output-mode-note">另存 _modified 副本，保留原文件</span></p>
             <div id="progress-section" class="progress-section">
                 <div id="progress-bar" class="progress-bar" role="progressbar" aria-label="批次处理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                     <div id="progress-fill" class="progress-fill"></div>
@@ -232,34 +195,36 @@
         <p id="crop-mode-hint"></p>
         <p>裁剪以 PDF 当前的可见区域为准，不会自动识别并去除扫描图像中的白边。</p>
     </div>
-    <div id="pdf-repair-help" class="info-popover" popover="manual" role="tooltip">
-        <h3>PDF 索引修复</h3>
-        <p id="pdf-repair-hint">PDF 无法正常读取时，尝试重建索引后继续处理。修复成功会按所选输出方式保存；默认另存副本，开启原位覆盖后会替换原文件。</p>
-        <p>修复失败会将该文件标记为失败，并继续处理其他文件。</p>
-    </div>
-    <div id="structure-tags-help" class="info-popover" popover="manual" role="tooltip">
-        <h3>结构标签修复</h3>
-        <p id="structure-tags-hint">检查可正常读取的 PDF，修复能确认的页内标签父子关系和内容索引，帮助处理 Acrobat 删页时的 PDS 类型错误。</p>
-        <p>标签完全失效且全书没有有效内容编号时，会清理失效的无障碍标签。扫描图、OCR 文字、页面尺寸与书签保留，修复结果按所选输出方式保存。无法可靠处理的对象或独立内容流标签保留原样，并在结果中说明。</p>
-    </div>
-    <div id="bookmark-repair-help" class="info-popover" popover="manual" role="tooltip">
-        <h3>异常书签修复</h3>
-        <p id="bookmark-repair-hint">检测并优先修复异常结构，尽量保留书签标题、层级和跳转目标。</p>
-        <p>如果无法修复且需要清理现有书签，会先询问。选择清理会移除处理结果中的全部书签；选择保留会继续其他处理。结果按所选输出方式保存，原位覆盖会替换原文件。</p>
-    </div>
     <div id="bookmark-fit-help" class="info-popover" popover="manual" role="tooltip">
-        <h3>书签跳转显示</h3>
-        <p id="bookmark-fit-hint">将文档内书签的跳转显示方式改为适合页面宽度，保留标题、层级与纵向位置。</p>
-        <p>外部链接不受影响；无法解析的跳转目标会跳过。</p>
+        <h3>统一书签缩放</h3>
+        <p id="bookmark-fit-hint">点击书签后，页面按窗口宽度显示。</p>
     </div>
+
+    <dialog id="repair-settings-dialog" class="advanced-dialog repair-settings-dialog" aria-labelledby="repair-settings-title">
+        <form id="repair-settings-form">
+            <header class="advanced-header">
+                <h2 id="repair-settings-title">文档修复高级设置</h2>
+                <button class="dialog-close" type="button" aria-label="关闭文档修复高级设置" data-close-dialog>×</button>
+            </header>
+            <div class="advanced-body">
+                <label class="check-option"><strong>修复 PDF 索引</strong><input id="option-repair-pdf" type="checkbox" role="switch" checked></label>
+                <label class="check-option"><strong>修复结构标签</strong><input id="option-repair-structure-tags" type="checkbox" role="switch" checked></label>
+                <label class="check-option"><strong>修复异常书签</strong><input id="option-repair-bookmarks" type="checkbox" role="switch" checked></label>
+            </div>
+            <footer class="advanced-footer"><div><button class="btn btn-secondary" type="button" data-close-dialog>取消</button><button class="btn btn-primary" type="submit">应用设置</button></div></footer>
+        </form>
+    </dialog>
 
     <dialog id="image-settings-dialog" class="advanced-dialog" aria-labelledby="image-settings-title" aria-describedby="image-settings-description">
         <form id="image-settings-form">
             <header class="advanced-header">
                 <div><span class="advanced-eyebrow">图像优化 / ADVANCED</span><h2 id="image-settings-title">高级图像设置</h2><p id="image-settings-description">适用于本批次全部 PDF；应用后会记住设置。</p></div>
-                <button id="btn-image-settings-close" class="dialog-close" type="button" aria-label="关闭高级图像设置">×</button>
+                <button class="dialog-close" type="button" aria-label="关闭高级图像设置" data-close-dialog>×</button>
             </header>
             <div class="advanced-body">
+                <section class="advanced-group" aria-labelledby="gpu-acceleration-title">
+                    <label class="check-option"><span><strong id="gpu-acceleration-title">GPU 加速</strong><small>GPU 不可用时自动使用 CPU。</small></span><input id="advanced-gpu-acceleration" type="checkbox" role="switch" checked></label>
+                </section>
                 <section class="advanced-group" aria-labelledby="visual-protection-title">
                     <label class="check-option"><span><strong id="visual-protection-title">自动保护封面与图片</strong><small>识别首尾页、连续色调及分层文字页的纸张背景，保留图片细节和浅色渐变。</small></span><input id="advanced-protect-visual" type="checkbox" role="switch" checked></label>
                     <p class="advanced-hint">触发时保留颜色与灰阶，跳过减色和转灰度；JPEG 质量至少 90，长边上限至少 3000 px，仅缩小不放大。分层纸张背景即使接近白色也保留渐变，未启用去底色且无需缩小时保留原 JPEG。更高质量、原始分辨率和关闭 JPEG 的设置仍有效。按图像启发式判断，可能误判；结果中可查看保护明细。关闭后统一使用下方参数，低灰阶减色可能使浅灰阴影变成斑块。</p>
@@ -297,7 +262,7 @@
                 </section>
                 <p class="advanced-note">去底色在缩小和减色前执行，JPEG 编码可能产生近似颜色。仅压缩的图像至少缩小 2% 才替换；实际去底色不受体积收益限制。透明蒙版及不支持的图像编码会保留。</p>
             </div>
-            <footer class="advanced-footer"><button id="btn-image-settings-reset" class="btn btn-secondary" type="button">恢复默认</button><div><button id="btn-image-settings-cancel" class="btn btn-secondary" type="button">取消</button><button class="btn btn-primary" type="submit">应用设置</button></div></footer>
+            <footer class="advanced-footer"><button id="btn-image-settings-reset" class="btn btn-secondary" type="button">恢复默认</button><div><button class="btn btn-secondary" type="button" data-close-dialog>取消</button><button class="btn btn-primary" type="submit">应用设置</button></div></footer>
         </form>
     </dialog>
 

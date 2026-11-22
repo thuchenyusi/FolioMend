@@ -314,7 +314,10 @@ fn read_parent_index(
     Ok(result)
 }
 
-pub fn repair(doc: &mut Document) -> Result<RepairResult, String> {
+pub fn repair(
+    doc: &mut Document,
+    confirm_cleanup: impl FnOnce() -> bool,
+) -> Result<RepairResult, String> {
     let catalog = doc.catalog().map_err(|_| "文档目录无法读取")?;
     let Ok(root_ref) = catalog.get(b"StructTreeRoot") else {
         return Ok(RepairResult {
@@ -412,6 +415,12 @@ pub fn repair(doc: &mut Document) -> Result<RepairResult, String> {
                 Ok::<_, String>(value)
             })
             .transpose()?;
+        if !confirm_cleanup() {
+            return Ok(RepairResult {
+                changed: false,
+                status: "未清理，已保留原结构标签".into(),
+            });
+        }
         // All fallible inspection is complete before the first mutation.
         for (id, node) in edits {
             doc.objects.insert(id, Object::Dictionary(node));
@@ -572,7 +581,7 @@ mod tests {
         let (mut doc, page, element, attributes) =
             fixture(b"/P << /MCID 0 >> BDC 0 0 20 20 re f EMC");
         let contents = doc.get_page_content(page).unwrap();
-        let result = repair(&mut doc).unwrap();
+        let result = repair(&mut doc, || panic!("index rebuild must not request cleanup")).unwrap();
         assert!(result.changed && result.status.contains("保留 1 个标签"));
         let root =
             dictionary(&doc, doc.catalog().unwrap().get(b"StructTreeRoot").unwrap()).unwrap();
@@ -592,7 +601,7 @@ mod tests {
             .get(b"StructParents")
             .is_ok());
         let objects = doc.objects.clone();
-        assert!(!repair(&mut doc).unwrap().changed);
+        assert!(!repair(&mut doc, || false).unwrap().changed);
         assert_eq!(doc.objects, objects);
     }
 
@@ -600,7 +609,11 @@ mod tests {
     fn dead_tags_are_cleared_only_when_the_whole_document_has_no_live_content_ids() {
         let (mut doc, page, _, _) = fixture(b"0 0 20 20 re f");
         let content = doc.get_page_content(page).unwrap();
-        let result = repair(&mut doc).unwrap();
+        let before = doc.objects.clone();
+        let kept = repair(&mut doc, || false).unwrap();
+        assert!(!kept.changed && kept.status.contains("已保留原结构标签"));
+        assert_eq!(doc.objects, before);
+        let result = repair(&mut doc, || true).unwrap();
         assert!(result.changed && result.status.contains("无障碍标签已移除"));
         assert!(doc.catalog().unwrap().get(b"StructTreeRoot").is_err());
         assert!(
@@ -618,11 +631,13 @@ mod tests {
             .is_err());
         assert!(doc.get_dictionary(page).unwrap().get(b"Tabs").is_err());
         assert_eq!(content, doc.get_page_content(page).unwrap());
-        assert!(!repair(&mut doc).unwrap().changed);
+        assert!(!repair(&mut doc, || false).unwrap().changed);
 
         let (mut doc, _, _, _) = fixture(b"/P << /MCID 1 >> BDC 0 0 20 20 re f EMC");
         let objects = doc.objects.clone();
-        assert!(repair(&mut doc).unwrap_err().contains("无法关联"));
+        assert!(repair(&mut doc, || panic!("ambiguous tags must be preserved"))
+            .unwrap_err()
+            .contains("无法关联"));
         assert_eq!(doc.objects, objects);
     }
 
@@ -638,7 +653,7 @@ mod tests {
         doc.get_dictionary_mut(element)
             .unwrap()
             .set("K", vec![Object::Integer(0), Object::Integer(1)]);
-        let result = repair(&mut doc).unwrap();
+        let result = repair(&mut doc, || false).unwrap();
         assert!(result.changed && result.status.contains("移除 1 处失效"));
         assert_eq!(
             doc.get_dictionary(element)
@@ -649,7 +664,7 @@ mod tests {
                 .unwrap(),
             &vec![Object::Integer(0)]
         );
-        assert!(!repair(&mut doc).unwrap().changed);
+        assert!(!repair(&mut doc, || false).unwrap().changed);
     }
 
     #[test]
@@ -660,7 +675,7 @@ mod tests {
         ] {
             let (mut doc, _, _, _) = fixture(content);
             let before = doc.objects.clone();
-            assert!(repair(&mut doc).is_err());
+            assert!(repair(&mut doc, || false).is_err());
             assert_eq!(doc.objects, before);
         }
         for kind in 0..4 {
@@ -680,7 +695,7 @@ mod tests {
                 }
             }
             let before = doc.objects.clone();
-            assert!(repair(&mut doc).is_err());
+            assert!(repair(&mut doc, || false).is_err());
             assert_eq!(doc.objects, before);
         }
     }
@@ -715,7 +730,7 @@ mod tests {
             vec![Object::Reference(page), Object::Reference(second_page)],
         );
         doc.get_dictionary_mut(pages).unwrap().set("Count", 2);
-        repair(&mut doc).unwrap();
+        repair(&mut doc, || false).unwrap();
         let key = |id| {
             doc.get_dictionary(id)
                 .unwrap()
@@ -725,6 +740,6 @@ mod tests {
                 .unwrap()
         };
         assert_ne!(key(page), key(second_page));
-        assert!(!repair(&mut doc).unwrap().changed);
+        assert!(!repair(&mut doc, || false).unwrap().changed);
     }
 }

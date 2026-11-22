@@ -8,7 +8,7 @@ mod pdf_processor;
 mod pdf_repair;
 mod structure_tags;
 
-use pdf_processor::{ProcessOptions, ProcessResult, ProcessingProgress};
+use pdf_processor::{ProcessOptions, ProcessResult, ProcessingProgress, RepairCleanup};
 use serde::Serialize;
 use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
@@ -103,15 +103,31 @@ async fn process_pdfs(
                 };
 
                 let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    pdf_processor::process_pdf_with_bookmark_confirmation(
+                    pdf_processor::process_pdf_with_repair_confirmation(
                         path,
                         options,
                         &mut report_progress,
-                        &mut || app.dialog()
-                            .message(format!("{}\n\n书签自动修复未能可靠恢复原有结构。是否清理全部书签？清理会移除所有现有书签，但保留页面内容。{}取消将保留原有书签并继续其他处理。", path, if options.overwrite_original { "处理成功后将覆盖原文件。" } else { "只写入输出副本。" }))
-                            .title("书签修复失败")
-                            .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom("清理书签".into(), "保留书签".into()))
-                            .blocking_show(),
+                        &mut |cleanup| {
+                            let (title, message, remove, keep) = match cleanup {
+                                RepairCleanup::StructureTags => (
+                                    "确认清理结构标签",
+                                    format!("{path}\n\n结构标签已完全失效。清理会移除无障碍标签，保留页面画面和 OCR 文字层。处理成功后将覆盖原文件。选择保留将继续其他处理。"),
+                                    "清理标签",
+                                    "保留标签",
+                                ),
+                                RepairCleanup::Bookmarks => (
+                                    "书签修复失败",
+                                    format!("{}\n\n书签自动修复未能可靠恢复原有结构。是否清理全部书签？清理会移除所有现有书签，但保留页面内容。{}取消将保留原有书签并继续其他处理。", path, if options.overwrite_original { "处理成功后将覆盖原文件。" } else { "只写入输出副本。" }),
+                                    "清理书签",
+                                    "保留书签",
+                                ),
+                            };
+                            app.dialog()
+                                .message(message)
+                                .title(title)
+                                .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom(remove.into(), keep.into()))
+                                .blocking_show()
+                        },
                     )
                 })) {
                     Ok(result) => result,

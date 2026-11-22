@@ -191,7 +191,7 @@ impl Default for ProcessOptions {
             custom_width: None,
             crop_mode: CropBoxMode::AlignVisible,
             repair_pdf: true,
-            repair_structure_tags: false,
+            repair_structure_tags: true,
             repair_bookmarks: true,
             fit_bookmarks_to_width: false,
         }
@@ -2197,9 +2197,9 @@ fn generate_output_path(input_path: &Path) -> PathBuf {
 
     for index in 0.. {
         let suffix = if index == 0 {
-            "_normalized".to_string()
+            "_modified".to_string()
         } else {
-            format!("_normalized_{}", index)
+            format!("_modified_{}", index)
         };
         let candidate = parent.join(format!("{}{}{}", stem, suffix, extension));
         if !candidate.exists() {
@@ -2588,14 +2588,20 @@ pub fn process_pdf_with_options_and_progress(
     options: ProcessOptions,
     on_progress: &mut dyn FnMut(ProcessingProgress),
 ) -> ProcessResult {
-    process_pdf_with_bookmark_confirmation(input_path, options, on_progress, &mut || false)
+    process_pdf_with_repair_confirmation(input_path, options, on_progress, &mut |_| false)
 }
 
-pub fn process_pdf_with_bookmark_confirmation(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairCleanup {
+    StructureTags,
+    Bookmarks,
+}
+
+pub fn process_pdf_with_repair_confirmation(
     input_path: &str,
     options: ProcessOptions,
     on_progress: &mut dyn FnMut(ProcessingProgress),
-    confirm_repair: &mut dyn FnMut() -> bool,
+    confirm_cleanup: &mut dyn FnMut(RepairCleanup) -> bool,
 ) -> ProcessResult {
     let path = Path::new(input_path);
 
@@ -2733,7 +2739,9 @@ pub fn process_pdf_with_bookmark_confirmation(
     let mut tags_repaired = false;
     if options.repair_structure_tags {
         report("检查结构标签", 0, 0, 0, 0, 0.018);
-        match crate::structure_tags::repair(&mut doc) {
+        match crate::structure_tags::repair(&mut doc, || {
+            !options.overwrite_original || confirm_cleanup(RepairCleanup::StructureTags)
+        }) {
             Ok(repair) => {
                 tags_repaired = repair.changed;
                 result.structure_tag_status = repair.status;
@@ -2756,7 +2764,7 @@ pub fn process_pdf_with_bookmark_confirmation(
                     format!("已修复异常书签结构，保留 {preserved} 条书签")
                 }
                 Err(reason) => {
-                    if !inspection.may_have_bookmarks || confirm_repair() {
+                    if !inspection.may_have_bookmarks || confirm_cleanup(RepairCleanup::Bookmarks) {
                         match doc.catalog_mut() {
                             Ok(catalog) => {
                                 catalog.remove(b"Outlines");
@@ -2874,7 +2882,7 @@ pub fn process_pdf_with_bookmark_confirmation(
     }
 
     if options.fit_bookmarks_to_width {
-        report("设置书签适合宽度", 0, result.page_count, 0, 0, 0.80);
+        report("统一书签缩放", 0, result.page_count, 0, 0, 0.80);
         (
             result.bookmarks_fit_width,
             result.bookmarks_fit_width_skipped,
@@ -3128,7 +3136,7 @@ mod tests {
     }
 
     #[test]
-    fn structure_tag_switch_is_opt_in_and_tag_only_repairs_write_a_copy() {
+    fn structure_tag_repair_defaults_on_and_cleanup_requires_confirmation_for_overwrite() {
         let (mut doc, page) = cropped_page_document();
         let root = doc.new_object_id();
         let element =
@@ -3159,12 +3167,13 @@ mod tests {
             normalize_pages: false,
             compress_images: false,
             repair_pdf: false,
+            repair_structure_tags: false,
             repair_bookmarks: false,
             ..Default::default()
         };
-        assert!(!options.repair_structure_tags);
+        assert!(ProcessOptions::default().repair_structure_tags);
         assert!(
-            !serde_json::from_str::<ProcessOptions>("{}")
+            serde_json::from_str::<ProcessOptions>("{}")
                 .unwrap()
                 .repair_structure_tags
         );
@@ -3201,6 +3210,40 @@ mod tests {
         );
         assert!(again.success && again.output_bytes == 0);
         assert_eq!(again.structure_tag_status, "无结构标签");
+
+        let original = std::fs::read(&input).unwrap();
+        let overwrite = ProcessOptions {
+            repair_structure_tags: true,
+            overwrite_original: true,
+            ..options
+        };
+        let kept = process_pdf_with_repair_confirmation(
+            input.to_str().unwrap(),
+            overwrite,
+            &mut |_| {},
+            &mut |cleanup| {
+                assert_eq!(cleanup, RepairCleanup::StructureTags);
+                false
+            },
+        );
+        assert!(kept.success && kept.output_bytes == 0);
+        assert!(kept.structure_tag_status.contains("已保留原结构标签"));
+        assert_eq!(std::fs::read(&input).unwrap(), original);
+
+        let cleaned = process_pdf_with_repair_confirmation(
+            input.to_str().unwrap(),
+            overwrite,
+            &mut |_| {},
+            &mut |cleanup| {
+                assert_eq!(cleanup, RepairCleanup::StructureTags);
+                true
+            },
+        );
+        assert!(cleaned.success, "{:?}", cleaned.error);
+        assert_eq!(Path::new(&cleaned.output_path), input);
+        let written = Document::load(&input).unwrap();
+        assert!(written.catalog().unwrap().get(b"StructTreeRoot").is_err());
+        assert_eq!(before, written.get_page_content(page).unwrap());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3708,11 +3751,11 @@ mod tests {
         };
         let (mut doc, _, _) = outline_fixture(false);
         doc.save(&path).unwrap();
-        let result = process_pdf_with_bookmark_confirmation(
+        let result = process_pdf_with_repair_confirmation(
             path.to_str().unwrap(),
             options,
             &mut |_| {},
-            &mut || panic!("empty corrupt tree must repair automatically"),
+            &mut |_| panic!("empty corrupt tree must repair automatically"),
         );
         assert!(result.success);
         let repaired = Document::load(&result.output_path).unwrap();
@@ -3728,22 +3771,22 @@ mod tests {
             repair_bookmarks: false,
             ..options
         };
-        let result = process_pdf_with_bookmark_confirmation(
+        let result = process_pdf_with_repair_confirmation(
             path.to_str().unwrap(),
             disabled,
             &mut |_| {},
-            &mut || panic!("disabled"),
+            &mut |_| panic!("disabled"),
         );
         assert_eq!(result.bookmark_status, "未启用");
         assert!(result.output_path.starts_with("无需处理"));
         let (mut doc, _, child) = outline_fixture(true);
         doc.get_dictionary_mut(child).unwrap().set("Next", child);
         doc.save(&path).unwrap();
-        let restored = process_pdf_with_bookmark_confirmation(
+        let restored = process_pdf_with_repair_confirmation(
             path.to_str().unwrap(),
             options,
             &mut |_| {},
-            &mut || panic!("recoverable structure must not ask to delete"),
+            &mut |_| panic!("recoverable structure must not ask to delete"),
         );
         assert!(restored.success);
         assert!(restored.bookmark_status.contains("保留 1 条书签"));
@@ -3758,11 +3801,12 @@ mod tests {
         doc.save(&path).unwrap();
         let before_failure = std::fs::read(&path).unwrap();
         let mut asked = false;
-        let result = process_pdf_with_bookmark_confirmation(
+        let result = process_pdf_with_repair_confirmation(
             path.to_str().unwrap(),
             options,
             &mut |_| {},
-            &mut || {
+            &mut |cleanup| {
+                assert_eq!(cleanup, RepairCleanup::Bookmarks);
                 asked = true;
                 false
             },
@@ -3771,11 +3815,14 @@ mod tests {
         assert!(result.bookmark_status.contains("保留原有书签"));
         assert!(result.output_path.starts_with("无需处理"));
         assert_eq!(std::fs::read(&path).unwrap(), before_failure);
-        let result = process_pdf_with_bookmark_confirmation(
+        let result = process_pdf_with_repair_confirmation(
             path.to_str().unwrap(),
             options,
             &mut |_| {},
-            &mut || true,
+            &mut |cleanup| {
+                assert_eq!(cleanup, RepairCleanup::Bookmarks);
+                true
+            },
         );
         assert!(result.success);
         assert!(Document::load(&result.output_path)
@@ -4069,7 +4116,7 @@ mod tests {
     fn test_generate_output_path() {
         let path = Path::new("/some/path/book.pdf");
         let output = generate_output_path(path);
-        assert!(output.to_string_lossy().contains("book_normalized.pdf"));
+        assert!(output.ends_with("book_modified.pdf"));
     }
 
     #[test]
@@ -4082,11 +4129,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let input = dir.join("book.pdf");
-        let first_output = dir.join("book_normalized.pdf");
+        let first_output = dir.join("book_modified.pdf");
         std::fs::write(&first_output, b"existing").unwrap();
 
         let output = generate_output_path(&input);
-        assert_eq!(output, dir.join("book_normalized_1.pdf"));
+        assert_eq!(output, dir.join("book_modified_1.pdf"));
 
         let _ = std::fs::remove_file(first_output);
         let _ = std::fs::remove_dir(dir);
