@@ -16,12 +16,32 @@ pub fn continuous_tone_fraction(pixels: &[u8], width: u32, height: u32, channels
     let sample_size = |n: u32| ((u64::from(n) * 768 / u64::from(edge)).max(1) as u32).min(n);
     let sw = sample_size(width);
     let sh = sample_size(height);
+    // Only neutral, predominantly light scans with visible dark ink qualify.
+    // Do not treat a uniformly pale gradient or a color photograph as paper.
+    let paper_scan = if channels == 1 {
+        let mut light = 0u32;
+        let mut ink = 0u32;
+        for sy in 0..sh {
+            let y = u64::from(sy) * u64::from(height) / u64::from(sh);
+            for sx in 0..sw {
+                let x = u64::from(sx) * u64::from(width) / u64::from(sw);
+                let value = pixels[(y * u64::from(width) + x) as usize];
+                light += u32::from(value >= 232);
+                ink += u32::from(value < 160);
+            }
+        }
+        let count = sw * sh;
+        light * 100 >= count * 80 && ink * 200 >= count && ink * 100 <= count * 20
+    } else {
+        false
+    };
     let mut tone_pixels = 0u32;
     for ty in (0..sh).step_by(24) {
         for tx in (0..sw).step_by(24) {
             let mut histograms = [[0u16; 32]; 3];
             let mut mid = [0u32; 3];
             let mut inner = [0u32; 3];
+            let mut paper = [0u32; 3];
             let count = (sw - tx).min(24) * (sh - ty).min(24);
             for sy in ty..(ty + 24).min(sh) {
                 let y = u64::from(sy) * u64::from(height) / u64::from(sh);
@@ -33,6 +53,7 @@ pub fn continuous_tone_fraction(pixels: &[u8], width: u32, height: u32, channels
                         histograms[c][value as usize / 8] += 1;
                         mid[c] += u32::from((24..=231).contains(&value));
                         inner[c] += u32::from((8..=247).contains(&value));
+                        paper[c] += u32::from(value >= 232);
                     }
                 }
             }
@@ -41,8 +62,14 @@ pub fn continuous_tone_fraction(pixels: &[u8], width: u32, height: u32, channels
                     .iter()
                     .filter(|&&n| u32::from(n) >= (count / 100).max(2))
                     .count();
-                (mid[c] * 100 >= count * 35 && bins >= 6)
-                    || (inner[c] * 100 >= count * 85 && bins >= 3)
+                // JPEG paper texture and show-through occupy several pale bins,
+                // even on plain text pages. A tile dominated by near-white paper
+                // is not evidence of a photograph. Keep this decision local so
+                // a real illustration embedded in a text page still protects it.
+                let paper_dominated = paper_scan && paper[c] * 100 >= count * 60;
+                !paper_dominated
+                    && ((mid[c] * 100 >= count * 35 && bins >= 6)
+                        || (inner[c] * 100 >= count * 85 && bins >= 3))
             });
             if continuous {
                 tone_pixels += count;
@@ -88,6 +115,29 @@ mod tests {
             continuous_tone_fraction(&vec![255; 384 * 384], 384, 384, 1),
             0.0
         );
+    }
+
+    #[test]
+    fn paper_texture_and_show_through_do_not_hide_embedded_pictures() {
+        let mut scan = vec![255; 384 * 384];
+        for y in 0..384 {
+            for x in 0..384 {
+                // Pale JPEG noise/bleed-through, with darker antialiased text.
+                scan[y * 384 + x] = if y % 16 < 4 && x % 9 < 3 {
+                    [60, 110, 150][x % 3]
+                } else {
+                    (232 + (x * 7 + y * 11) % 24) as u8
+                };
+            }
+        }
+        assert!(continuous_tone_fraction(&scan, 384, 384, 1) < 0.03);
+        // A real picture must still protect the whole page, even on noisy paper.
+        for y in 96..224 {
+            for x in 96..224 {
+                scan[y * 384 + x] = (20 + (x - 96) * 210 / 128) as u8;
+            }
+        }
+        assert!(continuous_tone_fraction(&scan, 384, 384, 1) >= 0.08);
     }
 
     #[test]

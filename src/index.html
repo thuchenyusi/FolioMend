@@ -118,7 +118,7 @@
                             <div><h3 id="images-title">图像优化</h3><p>减小体积，保留扫描内容</p></div>
                         </div>
                         <label class="check-option">
-                            <span><strong>压缩扫描图像</strong><small>按图像类型优化体积，JPEG 质量、分辨率和减色可在高级设置中调整</small></span>
+                            <span><strong>压缩 PDF</strong><small>压缩图像并合并完全相同的字体流，图像参数可在高级设置中调整</small></span>
                             <input id="option-compress-images" type="checkbox" role="switch" checked>
                         </label>
                         <label class="check-option">
@@ -134,7 +134,7 @@
                     <section class="option-category category-repair" aria-labelledby="repair-title">
                         <div class="category-heading">
                             <span class="category-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6l-8-3Z"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg></span>
-                            <div><h3 id="repair-title">文档修复</h3><p>处理无法正常读取的 PDF</p></div>
+                            <div><h3 id="repair-title">文档修复</h3><p>修复读取异常和结构标签</p></div>
                         </div>
                         <div class="check-option">
                             <span>
@@ -142,9 +142,19 @@
                                     <label for="option-repair-pdf"><strong>自动修复 PDF 索引</strong></label>
                                     <button class="info-button" type="button" aria-label="PDF 索引修复说明" aria-expanded="false" aria-controls="pdf-repair-help" aria-describedby="pdf-repair-hint"><span aria-hidden="true">i</span></button>
                                 </span>
-                                <small id="pdf-repair-description">读取失败时尝试修复，输出副本并保留原文件</small>
+                                <small id="pdf-repair-description">读取失败时尝试修复，按所选输出方式保存</small>
                             </span>
                             <input id="option-repair-pdf" type="checkbox" role="switch" aria-describedby="pdf-repair-description" checked>
+                        </div>
+                        <div class="check-option">
+                            <span>
+                                <span class="option-title">
+                                    <label for="option-repair-structure-tags"><strong>修复结构标签</strong></label>
+                                    <button class="info-button" type="button" aria-label="结构标签修复说明" aria-expanded="false" aria-controls="structure-tags-help" aria-describedby="structure-tags-hint"><span aria-hidden="true">i</span></button>
+                                </span>
+                                <small id="structure-tags-description">重建可确认的标签索引；完全失效时清理标签，保留画面与 OCR</small>
+                            </span>
+                            <input id="option-repair-structure-tags" type="checkbox" role="switch" aria-describedby="structure-tags-description">
                         </div>
                     </section>
 
@@ -177,6 +187,15 @@
                             </div>
                         </div>
                     </section>
+                    <section class="option-category" aria-labelledby="output-title">
+                        <div class="category-heading">
+                            <div><h3 id="output-title">输出方式</h3><p>默认另存带后缀的副本</p></div>
+                        </div>
+                        <label class="check-option">
+                            <span><strong>原位覆盖原文件</strong><small id="overwrite-description">不添加后缀，不保留原文件副本；开始处理前会再次确认</small></span>
+                            <input id="option-overwrite-original" type="checkbox" role="switch" aria-describedby="overwrite-description">
+                        </label>
+                    </section>
                 </div>
             </section>
 
@@ -185,7 +204,7 @@
 
     <footer class="action-section">
         <div class="action-inner">
-            <p class="output-note">输出至原文件目录<span>另存副本，保留原文件</span></p>
+            <p class="output-note">输出至原文件目录<span id="output-mode-note">另存副本，保留原文件</span></p>
             <div id="progress-section" class="progress-section">
                 <div id="progress-bar" class="progress-bar" role="progressbar" aria-label="批次处理进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                     <div id="progress-fill" class="progress-fill"></div>
@@ -215,13 +234,18 @@
     </div>
     <div id="pdf-repair-help" class="info-popover" popover="manual" role="tooltip">
         <h3>PDF 索引修复</h3>
-        <p id="pdf-repair-hint">PDF 无法正常读取时，尝试重建索引后继续处理。修复成功会输出新副本，原文件保留。</p>
+        <p id="pdf-repair-hint">PDF 无法正常读取时，尝试重建索引后继续处理。修复成功会按所选输出方式保存；默认另存副本，开启原位覆盖后会替换原文件。</p>
         <p>修复失败会将该文件标记为失败，并继续处理其他文件。</p>
+    </div>
+    <div id="structure-tags-help" class="info-popover" popover="manual" role="tooltip">
+        <h3>结构标签修复</h3>
+        <p id="structure-tags-hint">检查可正常读取的 PDF，修复能确认的页内标签父子关系和内容索引，帮助处理 Acrobat 删页时的 PDS 类型错误。</p>
+        <p>标签完全失效且全书没有有效内容编号时，会清理失效的无障碍标签。扫描图、OCR 文字、页面尺寸与书签保留，修复结果按所选输出方式保存。无法可靠处理的对象或独立内容流标签保留原样，并在结果中说明。</p>
     </div>
     <div id="bookmark-repair-help" class="info-popover" popover="manual" role="tooltip">
         <h3>异常书签修复</h3>
         <p id="bookmark-repair-hint">检测并优先修复异常结构，尽量保留书签标题、层级和跳转目标。</p>
-        <p>如果无法修复且需要清理现有书签，会先询问。选择清理会移除输出副本中的全部书签；选择保留会继续其他处理。原文件保留。</p>
+        <p>如果无法修复且需要清理现有书签，会先询问。选择清理会移除处理结果中的全部书签；选择保留会继续其他处理。结果按所选输出方式保存，原位覆盖会替换原文件。</p>
     </div>
     <div id="bookmark-fit-help" class="info-popover" popover="manual" role="tooltip">
         <h3>书签跳转显示</h3>
@@ -237,8 +261,13 @@
             </header>
             <div class="advanced-body">
                 <section class="advanced-group" aria-labelledby="visual-protection-title">
-                    <label class="check-option"><span><strong id="visual-protection-title">自动保护封面与图片</strong><small>识别首尾页和连续色调区域，对照片、渐变插图使用更保守的压缩。</small></span><input id="advanced-protect-visual" type="checkbox" role="switch" checked></label>
-                    <p class="advanced-hint">触发时保留颜色与灰阶，跳过减色和转灰度；JPEG 质量至少 90，长边上限至少 3000 px，仅缩小不放大。更高质量、原始分辨率和关闭 JPEG 的设置仍有效。按图像启发式判断，可能误判；结果中可查看保护明细。关闭后所有图像统一使用下方参数。</p>
+                    <label class="check-option"><span><strong id="visual-protection-title">自动保护封面与图片</strong><small>识别首尾页、连续色调及分层文字页的纸张背景，保留图片细节和浅色渐变。</small></span><input id="advanced-protect-visual" type="checkbox" role="switch" checked></label>
+                    <p class="advanced-hint">触发时保留颜色与灰阶，跳过减色和转灰度；JPEG 质量至少 90，长边上限至少 3000 px，仅缩小不放大。分层纸张背景即使接近白色也保留渐变，未启用去底色且无需缩小时保留原 JPEG。更高质量、原始分辨率和关闭 JPEG 的设置仍有效。按图像启发式判断，可能误判；结果中可查看保护明细。关闭后统一使用下方参数，低灰阶减色可能使浅灰阴影变成斑块。</p>
+                </section>
+                <section class="advanced-group" aria-labelledby="paper-background-title">
+                    <label class="check-option"><span><strong id="paper-background-title">文字页去底色</strong><small>提白灰黄纸张背景，保留深色笔画和鲜明彩色标记；默认关闭。</small></span><input id="advanced-remove-paper" type="checkbox" role="switch"></label>
+                    <div class="advanced-field"><label for="advanced-paper-white-point">纸张白点</label><input id="advanced-paper-white-point" type="number" min="160" max="245" step="1" value="205" required disabled aria-describedby="paper-background-description"></div>
+                    <p id="paper-background-description" class="advanced-hint">白点越低，去底色越强，建议从 205 开始；浅色笔迹可能变淡。封面和照片保护开启时跳过疑似图片；识别到分层扫描的纸张背景时只提白底图，文字蒙版保持原样。实际去底色会保留输出，即使文件变大。</p>
                 </section>
                 <section class="advanced-group" aria-labelledby="jpeg-title">
                     <label class="check-option"><span><strong id="jpeg-title">JPEG 压缩</strong><small>彩色、灰度和黑白图像共用此质量；纯黑白图像会择优保留更小的无损编码。</small></span><input id="advanced-jpeg-enabled" type="checkbox" role="switch" checked></label>
@@ -266,7 +295,7 @@
                     <div class="advanced-field"><label for="advanced-color-reduction">彩色</label><select id="advanced-color-reduction" aria-describedby="color-reduction-description"></select></div>
                     <p id="color-reduction-description" class="advanced-hint"></p>
                 </section>
-                <p class="advanced-note">减色在编码前执行，JPEG 编码可能产生近似颜色。新图像至少缩小 2% 才替换；透明蒙版及不支持的图像编码会保留。</p>
+                <p class="advanced-note">去底色在缩小和减色前执行，JPEG 编码可能产生近似颜色。仅压缩的图像至少缩小 2% 才替换；实际去底色不受体积收益限制。透明蒙版及不支持的图像编码会保留。</p>
             </div>
             <footer class="advanced-footer"><button id="btn-image-settings-reset" class="btn btn-secondary" type="button">恢复默认</button><div><button id="btn-image-settings-cancel" class="btn btn-secondary" type="button">取消</button><button class="btn btn-primary" type="submit">应用设置</button></div></footer>
         </form>

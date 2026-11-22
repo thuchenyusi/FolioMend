@@ -27,6 +27,11 @@ const fileCount = document.getElementById("file-count");
 const progressBar = document.getElementById("progress-bar");
 const optionHelp = document.getElementById("btn-option-help");
 const optionsGrid = document.getElementById("options-grid");
+const optionOverwriteOriginal = document.getElementById("option-overwrite-original");
+optionOverwriteOriginal.addEventListener("change", () => {
+    document.getElementById("output-mode-note").textContent = optionOverwriteOriginal.checked
+        ? "原位覆盖，不保留原文件副本" : "另存副本，保留原文件";
+});
 
 for (const label of optionsGrid.querySelectorAll(".check-option")) {
     label.title = label.querySelector("small").textContent;
@@ -177,12 +182,15 @@ const btnImageSettings = document.getElementById("btn-image-settings");
 const defaultImageOptions = Object.freeze({
     gpuAcceleration: true,
     protectVisualImages: true,
+    removePaperBackground: false, paperWhitePoint: 205,
     jpegEnabled: true, jpegQuality: 80, downsample: true, maxLongEdge: 2000,
     allowColorToGray: false, colorDifference: 20, colorPixelPercent: 5,
     grayscaleReduction: "preserve", colorReduction: "preserve",
 });
 const imageFields = {
     protectVisualImages: document.getElementById("advanced-protect-visual"),
+    removePaperBackground: document.getElementById("advanced-remove-paper"),
+    paperWhitePoint: document.getElementById("advanced-paper-white-point"),
     jpegEnabled: document.getElementById("advanced-jpeg-enabled"),
     jpegQuality: document.getElementById("advanced-jpeg-quality"),
     downsample: document.getElementById("advanced-downsample"),
@@ -246,7 +254,7 @@ function validStoredImageOption(key, value) {
     if (typeof defaultValue === "string") return Object.hasOwn(reductionModes[key], value);
     if (!Number.isFinite(value)) return false;
     if (key === "colorPixelPercent") return value >= 0 && value <= 100;
-    const ranges = { jpegQuality: [1, 100], maxLongEdge: [256, 20000], colorDifference: [1, 255] };
+    const ranges = { jpegQuality: [1, 100], maxLongEdge: [256, 20000], colorDifference: [1, 255], paperWhitePoint: [160, 245] };
     return Number.isInteger(value) && value >= ranges[key][0] && value <= ranges[key][1];
 }
 try {
@@ -267,6 +275,7 @@ function updateImageSettingsSummary() {
         imageOptions.downsample ? `长边 ${imageOptions.maxLongEdge} px` : "原始分辨率",
         imageOptions.allowColorToGray ? "允许转灰度" : "保留彩色"];
     if (imageOptions.protectVisualImages) pieces.push("封面／图片保护");
+    if (imageOptions.removePaperBackground) pieces.push(`去底色 · 白点 ${imageOptions.paperWhitePoint}`);
     if (imageOptions.grayscaleReduction !== "preserve") pieces.push(reductionLabel("grayscaleReduction", imageOptions.grayscaleReduction));
     if (imageOptions.colorReduction !== "preserve") pieces.push(`彩色 ${reductionLabel("colorReduction", imageOptions.colorReduction)}`);
     document.getElementById("image-settings-summary").textContent = optionCompressImages.checked
@@ -276,6 +285,7 @@ function updateImageSettingsSummary() {
 function updateAdvancedControls() {
     imageFields.jpegQuality.disabled = jpegSlider.disabled = !imageFields.jpegEnabled.checked;
     imageFields.maxLongEdge.disabled = !imageFields.downsample.checked;
+    imageFields.paperWhitePoint.disabled = !imageFields.removePaperBackground.checked;
     imageFields.colorDifference.disabled = imageFields.colorPixelPercent.disabled = !imageFields.allowColorToGray.checked;
     document.getElementById("gray-reduction-description").textContent = grayReductionModes[imageFields.grayscaleReduction.value].hint;
     document.getElementById("color-reduction-description").textContent = colorReductionModes[imageFields.colorReduction.value].hint;
@@ -328,6 +338,11 @@ updateImageSettingsSummary();
 
 const optionNormalizePages = document.getElementById("option-normalize-pages");
 const optionRepairPdf = document.getElementById("option-repair-pdf");
+const optionRepairStructureTags = document.getElementById("option-repair-structure-tags");
+try { optionRepairStructureTags.checked = localStorage.getItem("repairStructureTags") === "true"; } catch (_) {}
+optionRepairStructureTags.addEventListener("change", () => {
+    try { localStorage.setItem("repairStructureTags", String(optionRepairStructureTags.checked)); } catch (_) {}
+});
 try { optionRepairPdf.checked = localStorage.getItem("repairPdf") !== "false"; } catch (_) {}
 optionRepairPdf.addEventListener("change", () => {
     try { localStorage.setItem("repairPdf", String(optionRepairPdf.checked)); } catch (_) {}
@@ -379,6 +394,7 @@ customWidth.addEventListener("input", () => {
 
 function getProcessingOptions() {
     return {
+        overwriteOriginal: optionOverwriteOriginal.checked,
         compressImages: optionCompressImages.checked,
         imageCompression: { ...imageOptions },
         normalizePages: optionNormalizePages.checked,
@@ -388,6 +404,7 @@ function getProcessingOptions() {
             : null,
         cropMode: cropMode.value,
         repairPdf: optionRepairPdf.checked,
+        repairStructureTags: optionRepairStructureTags.checked,
         repairBookmarks: optionRepairBookmarks.checked,
         fitBookmarksToWidth: optionFitBookmarks.checked,
     };
@@ -542,8 +559,10 @@ btnProcess.addEventListener("click", async () => {
     optionNormalizePages.disabled = true;
     cropMode.disabled = true;
     optionRepairPdf.disabled = true;
+    optionRepairStructureTags.disabled = true;
     optionRepairBookmarks.disabled = true;
     optionFitBookmarks.disabled = true;
+    optionOverwriteOriginal.disabled = true;
     showWorkspace("files");
     resultsSummary.textContent = "处理中，完成后将在此显示结果";
     resultsList.innerHTML = '<p class="empty-hint">正在处理 PDF，请稍候...</p>';
@@ -577,6 +596,13 @@ btnProcess.addEventListener("click", async () => {
             options: activeOptions,
         });
 
+        if (options.overwriteOriginal && results.length === 0) {
+            resultsSummary.textContent = "已取消原位覆盖";
+            resultsList.innerHTML = '<p class="empty-hint">未处理任何文件。</p>';
+            setProgress(0, "已取消原位覆盖，未处理任何文件");
+            showMessage("已取消原位覆盖，未处理任何文件。", "info");
+            return;
+        }
         setProgress(100, "处理完成！");
 
         showResults(results);
@@ -600,8 +626,10 @@ btnProcess.addEventListener("click", async () => {
         optionNormalizePages.disabled = false;
         cropMode.disabled = false;
         optionRepairPdf.disabled = false;
+        optionRepairStructureTags.disabled = false;
         optionRepairBookmarks.disabled = false;
         optionFitBookmarks.disabled = false;
+        optionOverwriteOriginal.disabled = false;
         updateWidthOptions();
     }
 });
@@ -633,13 +661,15 @@ function renderImageReport(result, options) {
     if (!stats) return `<p>${classification} · 已压缩 ${formatCount(result.optimized_images)} · 跳过 ${formatCount(result.skipped_images)}</p>`;
     if (!stats.total_images) return '<section class="image-report"><h4>图像优化</h4><p>未发现可引用的扫描图像。</p></section>';
     const written = result.output_bytes > 0 ? changes.length : 0;
-    const colors = changes.filter(change => change.color_converted || change.binarized || change.quantized);
+    const colors = changes.filter(change => change.background_cleaned || change.color_converted || change.binarized || change.quantized);
+    const imageByteDelta = stats.original_image_bytes - stats.output_image_bytes;
     const beforeColors = colors.reduce((total, change) => total + change.sampled_colors_before, 0);
     const afterColors = colors.reduce((total, change) => total + change.sampled_colors_after, 0);
     const adaptiveChanges = changes.filter(change => change.adaptive_reduction);
     const actionCounts = [
         ["彩色转灰度／黑白", stats.color_converted_images],
         ["二值化", stats.binarized_images], ["色阶量化", stats.quantized_images],
+        ["去底色", stats.background_cleaned_images || 0],
         ["降低分辨率", stats.downsampled_images], ["JPEG 编码", stats.jpeg_images], ["Flate 编码", stats.flate_images],
     ];
     if (adaptiveChanges.length) actionCounts.push(["自适应选择", adaptiveChanges.length]);
@@ -647,6 +677,7 @@ function renderImageReport(result, options) {
         ["收益未超过 2%", stats.insufficient_savings_images],
         ["已是黑白编码", stats.already_monochrome_images],
         ["蒙版或特殊解码参数", stats.protected_images],
+        ["纸张背景保护，无需重编码", stats.visual_retained_images],
         ["编码或尺寸不支持", stats.unsupported_images],
         ["重新编码失败", stats.encoding_failed_images],
         ["整份文件未变小，放弃候选结果", stats.discarded_images],
@@ -658,15 +689,16 @@ function renderImageReport(result, options) {
         `彩色：${reductionLabel("colorReduction", settings.colorReduction)}`,
         settings.allowColorToGray ? `转灰度：彩色比例 ≤ ${settings.colorPixelPercent}%，差异阈值 ${settings.colorDifference}` : "关闭彩色转灰度",
         settings.protectVisualImages ? "封面／图片保护开启（触发时采用更保守参数）" : "封面／图片保护关闭",
+        settings.removePaperBackground ? `去底色开启（纸张白点 ${settings.paperWhitePoint}）` : "去底色关闭",
     ].map(escapeHtml).join(" · ") : "";
     const rows = changes.map(change => {
-        const actions = [change.color_converted && "转灰度", change.binarized && "二值化", change.quantized && "量化", change.downsampled && "缩小"].filter(Boolean);
+        const actions = [change.background_cleaned && "去底色", change.color_converted && "转灰度", change.binarized && "二值化", change.quantized && "量化", change.downsampled && "缩小"].filter(Boolean);
         const automatic = change.adaptive_reduction;
         const protection = protectionById.get(change.object_id.join(":"));
         const protectionText = protection ? `<small>保护：${escapeHtml(protection.reason)}</small>` : "";
         const adaptiveText = automatic ? `<small>自动 → ${escapeHtml(adaptiveReductionLabel(automatic))} · ${escapeHtml(automatic.reason)}</small>` : "";
         const encoding = change.encoding === "DCTDecode" ? "JPEG" : "Flate";
-        const sampled = change.color_converted || change.binarized || change.quantized
+        const sampled = change.background_cleaned || change.color_converted || change.binarized || change.quantized
             ? `${formatCount(change.sampled_colors_before)} → ${formatCount(change.sampled_colors_after)}` : "—";
         return `<tr><td>${formatCount(change.object_id[0])} ${formatCount(change.object_id[1])} R</td>
             <td>${actions.join("、") || "重新编码"}<small>${encoding} · ${change.original_bits_per_pixel} → ${change.bits_per_pixel} bit/像素</small>${adaptiveText}${protectionText}</td>
@@ -682,7 +714,7 @@ function renderImageReport(result, options) {
         <h4>图像优化 · 实际结果</h4>
         <div class="image-metrics">
             <div><span>实际写回</span><strong>${formatCount(written)} / ${formatCount(stats.total_images)} 张</strong><small>保留原图 ${formatCount(stats.total_images - written)} 张</small></div>
-            <div><span>图像流节省</span><strong>${formatBytes(stats.original_image_bytes - stats.output_image_bytes)}</strong><small>${formatBytes(stats.original_image_bytes)} → ${formatBytes(stats.output_image_bytes)} · ${reductionText(stats.original_image_bytes, stats.output_image_bytes)}</small></div>
+            <div><span>${imageByteDelta >= 0 ? "图像流节省" : "图像流增加"}</span><strong>${formatBytes(Math.abs(imageByteDelta))}</strong><small>${formatBytes(stats.original_image_bytes)} → ${formatBytes(stats.output_image_bytes)} · ${reductionText(stats.original_image_bytes, stats.output_image_bytes)}</small></div>
             <div><span>图像像素</span><strong>${reductionText(stats.original_pixels, stats.output_pixels)}</strong><small>${formatCount(stats.original_pixels / 1e6)} → ${formatCount(stats.output_pixels / 1e6)} 百万像素</small></div>
         </div>
         <p class="image-report-types">${classification}</p>
@@ -715,7 +747,7 @@ function showResults(results) {
     }
     resultsList.innerHTML = results.map((r) => {
         const filename = r.input_path.split(/[\\/]/).pop() || r.input_path;
-        const status = r.success ? (r.output_bytes > 0 ? "已输出" : "无需处理") : "失败";
+        const status = r.success ? (r.output_bytes > 0 ? (options.overwriteOriginal ? "已覆盖" : "已输出") : "无需处理") : "失败";
         const statusClass = r.success ? "success" : "error";
         let preview;
         let detail;
@@ -732,8 +764,9 @@ function showResults(results) {
                 ? `${r.page_count} 页 · ${formatBytes(r.original_bytes)} → ${formatBytes(r.output_bytes)} · ${sizeChangeText}`
                 : `${r.page_count} 页 · 无需生成新文件`;
             if (r.output_bytes > 0 && r.image_statistics) {
-                const colors = r.image_statistics.changes.filter(change => change.color_converted || change.binarized || change.quantized).length;
+                const colors = r.image_statistics.changes.filter(change => change.background_cleaned || change.color_converted || change.binarized || change.quantized).length;
                 preview += ` · 颜色处理 ${formatCount(colors)} 张 · 缩小 ${formatCount(r.image_statistics.downsampled_images)} 张`;
+                if (r.image_statistics.background_cleaned_images) preview += ` · 去底色 ${formatCount(r.image_statistics.background_cleaned_images)} 张`;
             }
             const sizeDetail = r.output_bytes > 0
                 ? `体积: ${formatBytes(r.original_bytes)} → ${formatBytes(r.output_bytes)}（${sizeChangeText}）<br>`
@@ -748,7 +781,9 @@ function showResults(results) {
                 页数: ${r.page_count} | ${normalizationDetail}<br>
                 ${cropDetail}<br>
                 ${renderImageReport(r, options)}
+                ${r.output_bytes > 0 && r.duplicate_font_streams ? `重复字体流：合并 ${formatCount(r.duplicate_font_streams)} 个，节省 ${formatBytes(r.duplicate_font_bytes)}<br>` : ""}
                 PDF 自动修复：${escapeHtml(r.pdf_repair_status || "未启用")}<br>
+                结构标签修复：${escapeHtml(r.structure_tag_status || "未启用")}<br>
                 书签检测：${escapeHtml(r.bookmark_status || "未启用")}<br>
                 ${options.fitBookmarksToWidth ? `书签适合宽度：已更新 ${r.bookmarks_fit_width || 0}，跳过 ${r.bookmarks_fit_width_skipped || 0}（外部链接或无法解析的目标）<br>` : ""}
                 ${sizeDetail}

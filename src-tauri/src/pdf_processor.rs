@@ -6,7 +6,7 @@ use jpeg_encoder::{
 };
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -27,9 +27,12 @@ pub struct ProcessResult {
     pub image_acceleration: String,
     pub image_statistics: Option<ImageStatistics>,
     pub image_settings: Option<ImageCompressionOptions>,
+    pub duplicate_font_streams: usize,
+    pub duplicate_font_bytes: u64,
     pub original_bytes: u64,
     pub output_bytes: u64,
     pub pdf_repair_status: String,
+    pub structure_tag_status: String,
     pub bookmark_status: String,
     pub bookmarks_fit_width: usize,
     pub bookmarks_fit_width_skipped: usize,
@@ -104,6 +107,8 @@ pub struct ImageCompressionOptions {
     pub jpeg_quality: u8,
     pub optimize_source_jpeg: bool,
     pub protect_visual_images: bool,
+    pub remove_paper_background: bool,
+    pub paper_white_point: u8,
     pub downsample: bool,
     pub max_long_edge: u32,
     pub allow_color_to_gray: bool,
@@ -121,6 +126,8 @@ impl Default for ImageCompressionOptions {
             jpeg_quality: 80,
             optimize_source_jpeg: true,
             protect_visual_images: true,
+            remove_paper_background: false,
+            paper_white_point: 205,
             downsample: true,
             max_long_edge: 2000,
             allow_color_to_gray: false,
@@ -134,6 +141,9 @@ impl Default for ImageCompressionOptions {
 
 impl ImageCompressionOptions {
     fn validate(self) -> Result<(), String> {
+        if self.remove_paper_background && !(160..=245).contains(&self.paper_white_point) {
+            return Err("纸张白点请输入 160–245 的整数；数值越低，去底色越强。".into());
+        }
         if self.color_reduction == ColorReduction::Monochrome {
             return Err("纯黑白只适用于黑白／灰度设置；彩色减色请选择每通道色阶。".into());
         }
@@ -157,6 +167,7 @@ impl ImageCompressionOptions {
 #[derive(Debug, Clone, Copy, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ProcessOptions {
+    pub overwrite_original: bool,
     pub image_compression: ImageCompressionOptions,
     pub compress_images: bool,
     pub normalize_pages: bool,
@@ -164,6 +175,7 @@ pub struct ProcessOptions {
     pub custom_width: Option<f64>,
     pub crop_mode: CropBoxMode,
     pub repair_pdf: bool,
+    pub repair_structure_tags: bool,
     pub repair_bookmarks: bool,
     pub fit_bookmarks_to_width: bool,
 }
@@ -171,6 +183,7 @@ pub struct ProcessOptions {
 impl Default for ProcessOptions {
     fn default() -> Self {
         Self {
+            overwrite_original: false,
             image_compression: ImageCompressionOptions::default(),
             compress_images: true,
             normalize_pages: true,
@@ -178,6 +191,7 @@ impl Default for ProcessOptions {
             custom_width: None,
             crop_mode: CropBoxMode::AlignVisible,
             repair_pdf: true,
+            repair_structure_tags: false,
             repair_bookmarks: true,
             fit_bookmarks_to_width: false,
         }
@@ -210,10 +224,12 @@ pub struct ImageStatistics {
     pub binarized_images: usize,
     pub quantized_images: usize,
     pub downsampled_images: usize,
+    pub background_cleaned_images: usize,
     pub jpeg_images: usize,
     pub flate_images: usize,
     pub unsupported_images: usize,
     pub protected_images: usize,
+    pub visual_retained_images: usize,
     pub already_monochrome_images: usize,
     pub encoding_failed_images: usize,
     pub insufficient_savings_images: usize,
@@ -241,6 +257,7 @@ impl ImageStatistics {
         self.binarized_images = 0;
         self.quantized_images = 0;
         self.downsampled_images = 0;
+        self.background_cleaned_images = 0;
         self.jpeg_images = 0;
         self.flate_images = 0;
         for protection in &mut self.visual_protections {
@@ -264,6 +281,7 @@ pub struct ImageChange {
     pub binarized: bool,
     pub quantized: bool,
     pub downsampled: bool,
+    pub background_cleaned: bool,
     pub encoding: String,
     pub source_jpeg_quantization: bool,
     pub sampled_colors_before: usize,
@@ -283,6 +301,7 @@ enum ImageRetentionReason {
     AlreadyMonochrome,
     Unsupported,
     Protected,
+    VisualPreservation,
     EncodingFailed,
     InsufficientSavings,
 }
@@ -308,6 +327,7 @@ enum ImageKind {
 
 #[derive(Debug)]
 struct DecodedImage {
+    preserve_separation: bool,
     width: u32,
     height: u32,
     channels: u8,
@@ -498,6 +518,48 @@ fn calculate_target_width(widths: &[f64]) -> f64 {
     }
 }
 
+// Contents may be an indirect array, not just a direct array or one stream.
+// Preserve stream order and shared streams while ensuring the output array
+// contains stream references only. Validate before adding any wrapper objects.
+fn page_content_streams(doc: &Document, contents: &Object) -> Result<Vec<ObjectId>, String> {
+    fn collect(
+        doc: &Document,
+        object: &Object,
+        active: &mut BTreeSet<ObjectId>,
+        streams: &mut Vec<ObjectId>,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth > 64 || streams.len() >= 100_000 {
+            return Err("页面内容引用过深或过多".into());
+        }
+        let (id, resolved) = doc
+            .dereference(object)
+            .map_err(|_| "页面内容引用无法解析")?;
+        match resolved {
+            Object::Array(children) => {
+                if let Some(id) = id {
+                    if !active.insert(id) {
+                        return Err("页面内容数组包含循环引用".into());
+                    }
+                }
+                for child in children {
+                    collect(doc, child, active, streams, depth + 1)?;
+                }
+                if let Some(id) = id {
+                    active.remove(&id);
+                }
+            }
+            Object::Stream(_) => streams.push(id.ok_or("页面内容流缺少间接引用")?),
+            Object::Null => {}
+            _ => return Err("页面内容不是内容流或内容流数组".into()),
+        }
+        Ok(())
+    }
+    let mut streams = Vec::new();
+    collect(doc, contents, &mut BTreeSet::new(), &mut streams, 0)?;
+    Ok(streams)
+}
+
 fn wrap_page_contents(
     doc: &mut Document,
     page_id: ObjectId,
@@ -514,6 +576,7 @@ fn wrap_page_contents(
     let Some(original_contents) = original_contents else {
         return Ok(());
     };
+    let original_streams = page_content_streams(doc, &original_contents)?;
 
     let pre_content = Content {
         operations: vec![
@@ -534,24 +597,24 @@ fn wrap_page_contents(
     let post_content = Content {
         operations: vec![Operation::new("Q", vec![])],
     };
-    let pre_id = doc.add_object(Stream::new(
-        Dictionary::new(),
-        pre_content
-            .encode()
-            .map_err(|e| format!("编码前置流失败: {e}"))?,
-    ));
-    let post_id = doc.add_object(Stream::new(
-        Dictionary::new(),
+    let mut prefix = pre_content
+        .encode()
+        .map_err(|e| format!("编码前置流失败: {e}"))?;
+    prefix.push(b'\n');
+    // Streams in a Contents array are concatenated without a guaranteed token
+    // separator. Also terminate a possible comment at the original stream end.
+    let mut suffix = vec![b'\n'];
+    suffix.extend(
         post_content
             .encode()
             .map_err(|e| format!("编码后置流失败: {e}"))?,
-    ));
+    );
+    suffix.push(b'\n');
+    let pre_id = doc.add_object(Stream::new(Dictionary::new(), prefix));
+    let post_id = doc.add_object(Stream::new(Dictionary::new(), suffix));
 
     let mut new_contents = vec![Object::Reference(pre_id)];
-    match original_contents {
-        Object::Array(contents) => new_contents.extend(contents),
-        content => new_contents.push(content),
-    }
+    new_contents.extend(original_streams.into_iter().map(Object::Reference));
     new_contents.push(Object::Reference(post_id));
     doc.get_object_mut(page_id)
         .map_err(|e| format!("无法获取页面对象: {e}"))?
@@ -716,6 +779,41 @@ fn image_color_space(doc: &Document, stream: &Stream) -> Option<Vec<u8>> {
     }
 }
 
+fn is_separation_image(doc: &Document, stream: &Stream) -> bool {
+    if stream
+        .dict
+        .get(b"BitsPerComponent")
+        .and_then(Object::as_i64)
+        .ok()
+        != Some(8)
+        || stream.dict.has(b"F")
+    {
+        return false;
+    }
+    let Some([Object::Name(kind), Object::Name(_), _, _]) = stream
+        .dict
+        .get(b"ColorSpace")
+        .and_then(|value| doc.dereference(value))
+        .ok()
+        .and_then(|(_, value)| value.as_array().ok())
+        .map(Vec::as_slice)
+    else {
+        return false;
+    };
+    kind == b"Separation"
+        && stream.dict.get(b"Decode").ok().is_none_or(|value| {
+            doc.dereference(value)
+                .ok()
+                .and_then(|(_, value)| value.as_array().ok())
+                .is_some_and(|values| {
+                    values.len() == 2
+                        && values
+                            .iter()
+                            .all(|value| get_number(value).is_some_and(f64::is_finite))
+                })
+        })
+}
+
 fn decode_jpx_image(
     doc: &Document,
     stream: &Stream,
@@ -766,6 +864,7 @@ fn decode_jpx_image(
             return None;
         }
         Some(DecodedImage {
+            preserve_separation: false,
             jpeg_quantization: None,
             width,
             height,
@@ -795,16 +894,21 @@ fn decode_image(doc: &Document, stream: &Stream) -> Option<DecodedImage> {
         return None;
     }
 
-    if stream.dict.get(b"Decode").is_ok() {
+    let preserve_separation = is_separation_image(doc, stream);
+    if stream.dict.has(b"Decode") && !preserve_separation {
         return None;
     }
     let channels = match image_color_space(doc, stream).as_deref() {
         Some(b"DeviceGray") => Some(1),
         Some(b"DeviceRGB") => Some(3),
+        Some(b"Separation") if preserve_separation => Some(1),
         _ => None,
     };
     match pdf_image_filters::decode(doc, stream, width, height, channels, bits)? {
-        ImageData::Jpeg2000(content) => decode_jpx_image(doc, stream, width, height, &content),
+        ImageData::Jpeg2000(content) if !preserve_separation => {
+            decode_jpx_image(doc, stream, width, height, &content)
+        }
+        ImageData::Jpeg2000(_) => None,
         ImageData::Jpeg(content) => {
             use image::ImageDecoder;
             let channels = channels?;
@@ -822,6 +926,7 @@ fn decode_image(doc: &Document, stream: &Stream) -> Option<DecodedImage> {
                 image.to_rgb8().into_raw()
             };
             Some(DecodedImage {
+                preserve_separation,
                 jpeg_quantization: JpegQuantization::read(content.as_ref()),
                 width,
                 height,
@@ -834,6 +939,7 @@ fn decode_image(doc: &Document, stream: &Stream) -> Option<DecodedImage> {
             let pixels =
                 pdf_image_filters::unpack_samples(&content, width, height, channels, bits)?;
             Some(DecodedImage {
+                preserve_separation,
                 jpeg_quantization: None,
                 width,
                 height,
@@ -1170,19 +1276,22 @@ fn sampled_color_count(pixels: &[u8], channels: u8) -> usize {
     colors.len()
 }
 
-fn image_is_protected(stream: &Stream) -> bool {
+fn image_has_mask(stream: &Stream) -> bool {
     stream
         .dict
         .get(b"SMaskInData")
         .is_ok_and(|value| value.as_i64().ok() != Some(0))
         || stream.dict.get(b"SMask").is_ok()
         || stream.dict.get(b"Mask").is_ok()
-        || stream.dict.get(b"Decode").is_ok()
         || stream
             .dict
             .get(b"ImageMask")
             .and_then(Object::as_bool)
             .unwrap_or(false)
+}
+
+fn image_is_protected(stream: &Stream) -> bool {
+    image_has_mask(stream) || stream.dict.has(b"Decode")
 }
 
 fn stream_pixel_count(stream: &Stream) -> u64 {
@@ -1205,14 +1314,34 @@ fn transformed_stream(
     options: ImageCompressionOptions,
 ) -> Option<ImageTransform> {
     // Do not change images whose pixel interpretation or transparency needs extra handling.
-    if image_is_protected(original) {
+    if image_has_mask(original) || (original.dict.has(b"Decode") && !image.preserve_separation) {
         return None;
     }
+    let cleaned_image;
+    let mut background_cleaned = false;
+    let source = if options.remove_paper_background && !image.preserve_separation {
+        let mut pixels = image.pixels.clone();
+        background_cleaned =
+            crate::paper_background::whiten(&mut pixels, image.channels, options.paper_white_point)
+                > 0;
+        cleaned_image = DecodedImage {
+            preserve_separation: false,
+            width: image.width,
+            height: image.height,
+            channels: image.channels,
+            pixels,
+            jpeg_quantization: image.jpeg_quantization.clone(),
+        };
+        &cleaned_image
+    } else {
+        image
+    };
     let max_edge = options.downsample.then_some(options.max_long_edge);
     // Classification tolerates a few colored pixels, but disabling conversion must
     // also protect faint color marks in otherwise neutral RGB scans.
-    let has_color =
-        kind == ImageKind::Color || (image.channels == 3 && colored_pixel_ratio(image, 0) > 0.0);
+    let has_color = !image.preserve_separation
+        && (kind == ImageKind::Color
+            || (image.channels == 3 && colored_pixel_ratio(image, 0) > 0.0));
     let keep_color = has_color
         && !(options.allow_color_to_gray
             && colored_pixel_ratio(image, options.color_difference) * 100.0
@@ -1223,7 +1352,8 @@ fn transformed_stream(
         .and_then(Object::as_i64)
         .ok()
         == Some(1);
-    let binary = !keep_color
+    let binary = !image.preserve_separation
+        && !keep_color
         && match options.grayscale_reduction {
             ColorReduction::Mild => kind == ImageKind::Monochrome,
             ColorReduction::Aggressive | ColorReduction::Monochrome => true,
@@ -1231,7 +1361,7 @@ fn transformed_stream(
         };
     let (mut pixels, width, height, used_gpu, channels) = if keep_color {
         let (width, height) = target_image_size(image, max_edge);
-        let rgb = image::RgbImage::from_raw(image.width, image.height, image.pixels.clone())?;
+        let rgb = image::RgbImage::from_raw(source.width, source.height, source.pixels.clone())?;
         let bytes = if (width, height) == (image.width, image.height) {
             rgb.into_raw()
         } else {
@@ -1245,16 +1375,19 @@ fn transformed_stream(
         } else {
             ImageKind::Grayscale
         };
-        let (bytes, width, height, gpu) = prepare_image(image, preparation, max_edge, |request| {
-            if options.gpu_acceleration {
-                gpu_images::preprocess(request)
-            } else {
-                None
-            }
-        })?;
+        let (bytes, width, height, gpu) =
+            prepare_image(source, preparation, max_edge, |request| {
+                if options.gpu_acceleration {
+                    gpu_images::preprocess(request)
+                } else {
+                    None
+                }
+            })?;
         (bytes, width, height, gpu, 1)
     };
-    let reduction = if keep_color {
+    let reduction = if image.preserve_separation {
+        ColorReduction::Preserve
+    } else if keep_color {
         options.color_reduction
     } else {
         options.grayscale_reduction
@@ -1350,17 +1483,20 @@ fn transformed_stream(
     let mut dict = original.dict.clone();
     dict.set("Width", width as i64);
     dict.set("Height", height as i64);
-    dict.set(
-        "ColorSpace",
-        Object::Name(if keep_color {
-            b"DeviceRGB".to_vec()
-        } else {
-            b"DeviceGray".to_vec()
-        }),
-    );
+    // An 8-bit Separation plane stores tints, not device-gray values.
+    if !image.preserve_separation {
+        dict.set(
+            "ColorSpace",
+            Object::Name(if keep_color {
+                b"DeviceRGB".to_vec()
+            } else {
+                b"DeviceGray".to_vec()
+            }),
+        );
+        dict.remove(b"Decode");
+    }
     dict.set("BitsPerComponent", bits as i64);
     dict.set("Filter", Object::Name(filter.as_bytes().to_vec()));
-    dict.remove(b"Decode");
     dict.remove(b"DecodeParms");
     let source_bits = original
         .dict
@@ -1389,6 +1525,7 @@ fn transformed_stream(
         binarized: binary && !source_binary,
         quantized,
         downsampled: (width, height) != (image.width, image.height),
+        background_cleaned,
         encoding: filter.to_string(),
         source_jpeg_quantization,
         sampled_colors_before: sampled_color_count(&image.pixels, image.channels),
@@ -1501,25 +1638,152 @@ fn visual_image_options(
         allow_color_to_gray: false,
         grayscale_reduction: ColorReduction::Preserve,
         color_reduction: ColorReduction::Preserve,
+        remove_paper_background: false,
         ..options
     };
     (conservative, Some(reason.into()))
 }
 
+fn inherited_page_resources(doc: &Document, mut id: ObjectId) -> Option<&Dictionary> {
+    let mut seen = BTreeSet::new();
+    while seen.insert(id) {
+        let node = doc.get_dictionary(id).ok()?;
+        if let Ok(resources) = node.get(b"Resources") {
+            return doc.dereference(resources).ok()?.1.as_dict().ok();
+        }
+        id = node.get(b"Parent").ok()?.as_reference().ok()?;
+    }
+    None
+}
+
+// A matching masked foreground at equal or higher resolution is evidence that a
+// pale image underneath it is the paper layer of an MRC scan, not a photograph.
+// Unknown/nested drawings and shared uses without that evidence stay protected.
+fn layered_paper_image_ids(doc: &Document, page_ids: &[ObjectId]) -> BTreeSet<ObjectId> {
+    let mut eligible = BTreeSet::new();
+    let mut excluded = BTreeSet::new();
+    for &page_id in page_ids {
+        let references = referenced_image_ids(doc, &[page_id]);
+        let analyze = || -> Option<BTreeSet<ObjectId>> {
+            let resources = inherited_page_resources(doc, page_id)?;
+            let (_, xobjects) = doc.dereference(resources.get(b"XObject").ok()?).ok()?;
+            let xobjects = xobjects.as_dict().ok()?;
+            let content = Content::decode(&doc.get_page_content(page_id).ok()?).ok()?;
+            let mut matrix = [1.0f64, 0.0, 0.0, 1.0, 0.0, 0.0];
+            let mut stack = Vec::new();
+            let mut drawings = Vec::new();
+            for op in content.operations {
+                match op.operator.as_str() {
+                    "q" => stack.push(matrix),
+                    "Q" => matrix = stack.pop()?,
+                    "cm" => {
+                        let m = op
+                            .operands
+                            .iter()
+                            .map(get_number)
+                            .collect::<Option<Vec<_>>>()?;
+                        if m.len() != 6 || !m.iter().all(|v| v.is_finite()) {
+                            return None;
+                        }
+                        let [a, b, c, d, e, f] = matrix;
+                        matrix = [
+                            m[0] * a + m[1] * c,
+                            m[0] * b + m[1] * d,
+                            m[2] * a + m[3] * c,
+                            m[2] * b + m[3] * d,
+                            m[4] * a + m[5] * c + e,
+                            m[4] * b + m[5] * d + f,
+                        ];
+                    }
+                    "Do" => {
+                        let name = op.operands.first()?.as_name().ok()?;
+                        let id = xobjects.get(name).ok()?.as_reference().ok()?;
+                        let stream = doc.get_object(id).ok()?.as_stream().ok()?;
+                        if stream.dict.get(b"Subtype").and_then(Object::as_name).ok()
+                            == Some(b"Image")
+                        {
+                            drawings.push((id, matrix, stream));
+                        } else {
+                            // A Form may reuse a candidate at another placement.
+                            // Do not infer safe paper context through unknown draws.
+                            return None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !stack.is_empty() {
+                return None;
+            }
+            let mut yes = BTreeSet::new();
+            let mut no = BTreeSet::new();
+            for (index, &(id, m, stream)) in drawings.iter().enumerate() {
+                if image_is_protected(stream) {
+                    continue;
+                }
+                let dimensions = |s: &Stream| -> Option<(u32, u32)> {
+                    Some((
+                        u32::try_from(s.dict.get(b"Width").ok()?.as_i64().ok()?).ok()?,
+                        u32::try_from(s.dict.get(b"Height").ok()?.as_i64().ok()?).ok()?,
+                    ))
+                };
+                let (w, h) = dimensions(stream)?;
+                let matched = w > 0
+                    && h > 0
+                    && drawings[index + 1..].iter().any(|&(_, fg_matrix, fg)| {
+                        let mask = fg
+                            .dict
+                            .get(b"SMask")
+                            .ok()
+                            .and_then(|o| doc.dereference(o).ok())
+                            .and_then(|(_, o)| o.as_stream().ok());
+                        let Some(mask) = mask else {
+                            return false;
+                        };
+                        let Some((fw, fh)) = dimensions(fg) else {
+                            return false;
+                        };
+                        if dimensions(mask) != Some((fw, fh))
+                            || mask
+                                .dict
+                                .get(b"BitsPerComponent")
+                                .and_then(Object::as_i64)
+                                .ok()
+                                != Some(1)
+                            || fw < w
+                            || fh < h
+                        {
+                            return false;
+                        }
+                        let extent = m[..4].iter().fold(0.0f64, |v, x| v.max(x.abs()));
+                        extent > 0.0
+                            && m.iter()
+                                .zip(fg_matrix)
+                                .all(|(a, b)| (a - b).abs() <= extent * 0.002)
+                    });
+                if matched {
+                    yes.insert(id);
+                } else {
+                    no.insert(id);
+                }
+            }
+            Some(yes.difference(&no).copied().collect())
+        };
+        let candidates = analyze().unwrap_or_default();
+        for id in references {
+            if candidates.contains(&id) {
+                eligible.insert(id);
+            } else {
+                excluded.insert(id);
+            }
+        }
+    }
+    eligible.difference(&excluded).copied().collect()
+}
+
 // Use a small, explicit boundary window; short documents only protect their
 // first/last page. This is a cover candidate heuristic, not semantic recognition.
 fn boundary_image_ids(doc: &Document, page_ids: &[ObjectId]) -> BTreeSet<ObjectId> {
-    fn inherited_resources(doc: &Document, mut id: ObjectId) -> Option<&Dictionary> {
-        let mut seen = BTreeSet::new();
-        while seen.insert(id) {
-            let node = doc.get_dictionary(id).ok()?;
-            if let Ok(resources) = node.get(b"Resources") {
-                return doc.dereference(resources).ok()?.1.as_dict().ok();
-            }
-            id = node.get(b"Parent").ok()?.as_reference().ok()?;
-        }
-        None
-    }
     fn painted_images(
         doc: &Document,
         content: &[u8],
@@ -1596,7 +1860,7 @@ fn boundary_image_ids(doc: &Document, page_ids: &[ObjectId]) -> BTreeSet<ObjectI
         .collect();
     let mut images = BTreeSet::new();
     for page in boundary_pages {
-        let Some(resources) = inherited_resources(doc, page) else {
+        let Some(resources) = inherited_page_resources(doc, page) else {
             continue;
         };
         let mut seen = BTreeSet::new();
@@ -1615,7 +1879,7 @@ fn process_image(
     image_id: ObjectId,
     options: ImageCompressionOptions,
 ) -> ImageWorkResult {
-    process_image_with_context(doc, image_id, options, false)
+    process_image_with_context(doc, image_id, options, false, false)
 }
 
 fn process_image_with_context(
@@ -1623,6 +1887,7 @@ fn process_image_with_context(
     image_id: ObjectId,
     options: ImageCompressionOptions,
     boundary_page: bool,
+    layered_paper: bool,
 ) -> ImageWorkResult {
     let mut result = ImageWorkResult {
         visual_protection: None,
@@ -1645,16 +1910,38 @@ fn process_image_with_context(
         result.retention_reason = Some(ImageRetentionReason::AlreadyMonochrome);
         return result;
     }
-    // Transparency and custom pixel mappings must retain the original stream.
-    if image_is_protected(stream) {
+    if image_has_mask(stream) || (stream.dict.has(b"Decode") && !is_separation_image(doc, stream)) {
         result.retention_reason = Some(ImageRetentionReason::Protected);
         return result;
     }
     let Some(image) = decode_image(doc, stream) else {
         return result;
     };
-    result.kind = Some(classify_image(&image));
-    let (options, protection_reason) = visual_image_options(&image, options, boundary_page);
+    result.kind = Some(if image.preserve_separation {
+        ImageKind::Color
+    } else {
+        classify_image(&image)
+    });
+    let paper_layer = !image.preserve_separation
+        && layered_paper
+        && !boundary_page
+        && crate::paper_background::looks_like_paper(&image.pixels, image.channels);
+    let protect_paper = options.protect_visual_images && paper_layer;
+    let whiten_paper = options.remove_paper_background && paper_layer;
+    let (mut options, mut protection_reason) = visual_image_options(&image, options, boundary_page);
+    // Keep all conservative encoding/color choices; only the recognized paper
+    // layer may be whitened despite its smooth tones looking like a photo.
+    if protect_paper {
+        options.jpeg_quality = options.jpeg_quality.max(90);
+        options.max_long_edge = options.max_long_edge.max(3000);
+        options.allow_color_to_gray = false;
+        options.grayscale_reduction = ColorReduction::Preserve;
+        options.color_reduction = ColorReduction::Preserve;
+        protection_reason = Some("分层扫描纸张背景（保留浅色渐变）".into());
+    }
+    if whiten_paper {
+        options.remove_paper_background = true;
+    }
     result.visual_protection = protection_reason.map(|reason| VisualProtection {
         object_id: image_id,
         reason,
@@ -1662,6 +1949,20 @@ fn process_image_with_context(
         max_long_edge: options.downsample.then_some(options.max_long_edge),
         retained_original: true,
     });
+    // Near-white paper often falls below the continuous-tone threshold. Never
+    // quantize it into gray islands or repeatedly re-encode an unchanged JPEG.
+    // Explicit whitening, resizing or lossless conversion still takes its path.
+    if protect_paper
+        && !options.remove_paper_background
+        && options.jpeg_enabled
+        && target_image_size(&image, options.downsample.then_some(options.max_long_edge))
+            == (image.width, image.height)
+        && pdf_image_filters::filter_names(doc, stream)
+            .is_some_and(|filters| filters.last().is_some_and(|f| f == "DCTDecode"))
+    {
+        result.retention_reason = Some(ImageRetentionReason::VisualPreservation);
+        return result;
+    }
     let Some(mut prepared) = transformed_stream(stream, &image, result.kind.unwrap(), options)
     else {
         result.retention_reason = Some(ImageRetentionReason::EncodingFailed);
@@ -1679,8 +1980,9 @@ fn process_image_with_context(
     }
     result.used_gpu = Some(prepared.used_gpu);
     result.skipped = false;
-    if (prepared.stream.content.len() as f32)
-        < stream.content.len() as f32 * (1.0 - MIN_SAVING_RATIO)
+    if prepared.change.background_cleaned
+        || (prepared.stream.content.len() as f32)
+            < stream.content.len() as f32 * (1.0 - MIN_SAVING_RATIO)
     {
         result.transform = Some(prepared);
         result.retention_reason = None;
@@ -1702,6 +2004,11 @@ fn optimize_images(
     let image_ids = referenced_image_ids(doc, page_ids);
     let boundary_ids = if options.protect_visual_images {
         boundary_image_ids(doc, page_ids)
+    } else {
+        BTreeSet::new()
+    };
+    let paper_ids = if options.remove_paper_background || options.protect_visual_images {
+        layered_paper_image_ids(doc, page_ids)
     } else {
         BTreeSet::new()
     };
@@ -1731,6 +2038,7 @@ fn optimize_images(
             let (sender, receiver) = mpsc::channel();
             let immutable_doc: &Document = doc;
             let boundary_ids = &boundary_ids;
+            let paper_ids = &paper_ids;
             for _ in 0..worker_count.min(batch.len()) {
                 let next_index = Arc::clone(&next_index);
                 let sender = sender.clone();
@@ -1745,6 +2053,7 @@ fn optimize_images(
                             image_id,
                             options,
                             boundary_ids.contains(&image_id),
+                            paper_ids.contains(&image_id),
                         ))
                         .is_err()
                     {
@@ -1778,6 +2087,7 @@ fn optimize_images(
                     stats.already_monochrome_images += 1
                 }
                 Some(ImageRetentionReason::Protected) => stats.protected_images += 1,
+                Some(ImageRetentionReason::VisualPreservation) => stats.visual_retained_images += 1,
                 Some(ImageRetentionReason::EncodingFailed) => stats.encoding_failed_images += 1,
                 Some(ImageRetentionReason::InsufficientSavings) => {
                     stats.insufficient_savings_images += 1
@@ -1809,6 +2119,7 @@ fn optimize_images(
                     stats.binarized_images += usize::from(change.binarized);
                     stats.quantized_images += usize::from(change.quantized);
                     stats.downsampled_images += usize::from(change.downsampled);
+                    stats.background_cleaned_images += usize::from(change.background_cleaned);
                     stats.jpeg_images += usize::from(change.encoding == "DCTDecode");
                     stats.flate_images += usize::from(change.encoding == "FlateDecode");
                     stats.changes.push(change);
@@ -1827,6 +2138,51 @@ fn optimize_images(
         .visual_protections
         .sort_by_key(|image| image.object_id);
     summary
+}
+
+fn deduplicate_font_streams(doc: &mut Document) -> (usize, u64) {
+    let font_ids = doc
+        .traverse_objects(|_| {})
+        .into_iter()
+        .filter_map(|id| doc.get_dictionary(id).ok())
+        .filter(|dict| dict.has_type(b"FontDescriptor"))
+        .flat_map(|dict| {
+            [b"FontFile".as_slice(), b"FontFile2", b"FontFile3"]
+                .into_iter()
+                .filter_map(|key| dict.get(key).and_then(Object::as_reference).ok())
+        })
+        .collect::<BTreeSet<_>>();
+
+    let mut canonical: HashMap<&[u8], Vec<(ObjectId, &Dictionary)>> = HashMap::new();
+    let mut replacements = HashMap::new();
+    let mut bytes = 0u64;
+    for id in font_ids {
+        // Match direct stream IDs so indirect reference chains remain intact.
+        let Some(Object::Stream(stream)) = doc.objects.get(&id) else {
+            continue;
+        };
+        let matching_bytes = canonical.entry(&stream.content).or_default();
+        if let Some(&(other_id, _)) = matching_bytes
+            .iter()
+            .find(|(_, dict)| *dict == &stream.dict)
+        {
+            replacements.insert(id, other_id);
+            bytes += stream.content.len() as u64;
+        } else {
+            matching_bytes.push((id, &stream.dict));
+        }
+    }
+
+    if !replacements.is_empty() {
+        doc.traverse_objects(|object| {
+            if let Object::Reference(id) = object {
+                if let Some(&replacement) = replacements.get(id) {
+                    *id = replacement;
+                }
+            }
+        });
+    }
+    (replacements.len(), bytes)
 }
 
 fn generate_output_path(input_path: &Path) -> PathBuf {
@@ -1852,6 +2208,63 @@ fn generate_output_path(input_path: &Path) -> PathBuf {
     }
 
     unreachable!()
+}
+
+// Keep the original untouched until the complete candidate has been flushed and
+// accepted. Drop removes partial, rejected, or unsuccessfully committed files.
+struct PendingPdfOutput {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl PendingPdfOutput {
+    fn save(doc: &mut Document, input_path: &Path) -> std::io::Result<(Self, u64)> {
+        use std::io::Write;
+
+        let (path, file) = loop {
+            let path = generate_output_path(input_path);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => break (path, file),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        };
+        let pending = Self {
+            path,
+            committed: false,
+        };
+        let mut writer = std::io::BufWriter::new(file);
+        doc.save_to(&mut writer)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        let bytes = writer.get_ref().metadata()?.len();
+        Ok((pending, bytes))
+    }
+
+    fn commit(mut self, input_path: &Path, overwrite: bool) -> std::io::Result<PathBuf> {
+        let output = if overwrite {
+            // rename replaces the destination atomically on supported local filesystems;
+            // never delete the original first, including when replacement is denied.
+            std::fs::rename(&self.path, input_path)?;
+            input_path.to_path_buf()
+        } else {
+            self.path.clone()
+        };
+        self.committed = true;
+        Ok(output)
+    }
+}
+
+impl Drop for PendingPdfOutput {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 /// Inspect only outline links, never follow arbitrary metadata or page references.
@@ -2221,6 +2634,8 @@ pub fn process_pdf_with_bookmark_confirmation(
         image_acceleration: "未启用".to_string(),
         image_statistics: None,
         image_settings: options.compress_images.then_some(options.image_compression),
+        duplicate_font_streams: 0,
+        duplicate_font_bytes: 0,
         original_bytes: std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0),
         output_bytes: 0,
         pdf_repair_status: if options.repair_pdf {
@@ -2230,6 +2645,7 @@ pub fn process_pdf_with_bookmark_confirmation(
         }
         .to_string(),
         bookmark_status: "未启用".to_string(),
+        structure_tag_status: "未启用".to_string(),
         bookmarks_fit_width: 0,
         bookmarks_fit_width_skipped: 0,
         success: false,
@@ -2312,6 +2728,18 @@ pub fn process_pdf_with_bookmark_confirmation(
             "已自动移除空密码加密"
         }
         .to_string();
+    }
+
+    let mut tags_repaired = false;
+    if options.repair_structure_tags {
+        report("检查结构标签", 0, 0, 0, 0, 0.018);
+        match crate::structure_tags::repair(&mut doc) {
+            Ok(repair) => {
+                tags_repaired = repair.changed;
+                result.structure_tag_status = repair.status;
+            }
+            Err(reason) => result.structure_tag_status = format!("未修复，保留原标签：{reason}"),
+        }
     }
 
     let mut bookmarks_repaired = false;
@@ -2438,6 +2866,9 @@ pub fn process_pdf_with_bookmark_confirmation(
             }
         };
         report("图像处理完成", 0, result.page_count, 0, 0, 0.80);
+        report("合并重复字体流", 0, result.page_count, 0, 0, 0.80);
+        (result.duplicate_font_streams, result.duplicate_font_bytes) =
+            deduplicate_font_streams(&mut doc);
     } else {
         report("已跳过图片压缩", 0, result.page_count, 0, 0, 0.80);
     }
@@ -2458,8 +2889,10 @@ pub fn process_pdf_with_bookmark_confirmation(
     let needs_page_geometry_change = needs_page_normalization || has_true_crop_work;
     let needs_modification = encryption_removed
         || pdf_repaired
+        || tags_repaired
         || needs_page_geometry_change
         || result.optimized_images > 0
+        || result.duplicate_font_streams > 0
         || bookmarks_repaired
         || result.bookmarks_fit_width > 0;
 
@@ -2510,31 +2943,42 @@ pub fn process_pdf_with_bookmark_confirmation(
     // A full rewrite must not retain offsets into an earlier incremental revision.
     doc.trailer.remove(b"Prev");
     doc.trailer.remove(b"XRefStm");
-    let output_path = generate_output_path(path);
-    result.output_path = output_path.to_string_lossy().to_string();
     report("保存 PDF", result.page_count, result.page_count, 0, 0, 0.99);
 
-    match doc.save(&output_path) {
-        Ok(_) => {
-            result.output_bytes = std::fs::metadata(&output_path)
-                .map(|meta| meta.len())
-                .unwrap_or(0);
-
+    match PendingPdfOutput::save(&mut doc, path) {
+        Ok((pending, output_bytes)) => {
             // A compression-only run must never leave the user with a larger file.
             if !encryption_removed
                 && !pdf_repaired
+                && !tags_repaired
                 && !needs_page_geometry_change
                 && !bookmarks_repaired
                 && result.bookmarks_fit_width == 0
+                && result
+                    .image_statistics
+                    .as_ref()
+                    .is_none_or(|s| s.background_cleaned_images == 0)
                 && result.original_bytes > 0
-                && result.output_bytes >= result.original_bytes
-                && std::fs::remove_file(&output_path).is_ok()
+                && output_bytes >= result.original_bytes
             {
                 result.output_path = "无需输出（压缩后体积没有减小）".to_string();
                 result.output_bytes = 0;
                 result.optimized_images = 0;
+                result.duplicate_font_streams = 0;
+                result.duplicate_font_bytes = 0;
                 if let Some(stats) = &mut result.image_statistics {
                     stats.discard_changes();
+                }
+            } else {
+                match pending.commit(path, options.overwrite_original) {
+                    Ok(output_path) => {
+                        result.output_path = output_path.to_string_lossy().to_string();
+                        result.output_bytes = output_bytes;
+                    }
+                    Err(error) => {
+                        result.error = Some(format!("保存文件失败，原文件已保留: {}", error));
+                        return result;
+                    }
                 }
             }
             result.success = true;
@@ -2552,6 +2996,213 @@ pub fn process_pdf_with_bookmark_confirmation(
 mod tests {
     use super::*;
     use lopdf::dictionary;
+
+    #[test]
+    fn normalization_flattens_indirect_contents_arrays_and_preserves_stream_order() {
+        for indirect in [false, true] {
+            let (mut doc, page) = cropped_page_document();
+            let first = doc.add_object(Stream::new(
+                Dictionary::new(),
+                b"q\n0 0 20 20 re f\nQ\n".to_vec(),
+            ));
+            let last = doc.add_object(Stream::new(
+                Dictionary::new(),
+                b"0 0 30 30 re f% trailing comment".to_vec(),
+            ));
+            let original = Object::Array(vec![first.into(), first.into(), last.into()]);
+            let contents = if indirect {
+                Object::Reference(doc.add_object(original.clone()))
+            } else {
+                original.clone()
+            };
+            doc.get_dictionary_mut(page)
+                .unwrap()
+                .set("Contents", contents);
+            let streams_before = [first, last].map(|id| doc.get_object(id).unwrap().clone());
+            transform_page_geometry(&mut doc, page, Some(900.0), CropBoxMode::AlignVisible)
+                .unwrap();
+            let contents = doc
+                .get_dictionary(page)
+                .unwrap()
+                .get(b"Contents")
+                .unwrap()
+                .as_array()
+                .unwrap();
+            assert_eq!(contents.len(), 5);
+            assert_eq!(&contents[1..4], original.as_array().unwrap());
+            assert!(contents.iter().all(|o| doc
+                .get_object(o.as_reference().unwrap())
+                .unwrap()
+                .as_stream()
+                .is_ok()));
+            let bytes = doc.get_page_content(page).unwrap();
+            assert!(bytes.windows(4).any(|s| s == b"cm\nq"));
+            assert!(bytes.ends_with(b"% trailing comment\nQ\n"));
+            assert!(!bytes.windows(3).any(|s| s == b"cmq"));
+            assert!(Content::decode(&bytes)
+                .unwrap()
+                .operations
+                .iter()
+                .all(|op| matches!(op.operator.as_str(), "q" | "Q" | "cm" | "re" | "f")));
+            for (id, before) in [first, last].into_iter().zip(streams_before) {
+                assert_eq!(&before, doc.get_object(id).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn normalization_validates_nested_contents_before_mutating_shared_or_invalid_objects() {
+        let (mut doc, page) = cropped_page_document();
+        let stream = doc.add_object(Stream::new(Dictionary::new(), b"0 0 20 20 re f".to_vec()));
+        let inner = doc.add_object(Object::Array(vec![stream.into()]));
+        let outer = doc.add_object(Object::Array(vec![inner.into(), stream.into()]));
+        let mut other = doc.get_dictionary(page).unwrap().clone();
+        other.set("Contents", outer);
+        let other = doc.add_object(other);
+        doc.get_dictionary_mut(page).unwrap().set("Contents", outer);
+        let shared_before = doc.get_object(outer).unwrap().clone();
+        wrap_page_contents(
+            &mut doc,
+            page,
+            PageTransform {
+                scale: 2.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            doc.get_dictionary(other)
+                .unwrap()
+                .get(b"Contents")
+                .unwrap()
+                .as_reference()
+                .unwrap(),
+            outer
+        );
+        assert_eq!(doc.get_object(outer).unwrap(), &shared_before);
+        assert_eq!(
+            page_content_streams(
+                &doc,
+                doc.get_dictionary(page).unwrap().get(b"Contents").unwrap()
+            )
+            .unwrap()
+            .len(),
+            4
+        );
+        for invalid in [Object::Reference((99999, 0)), Object::Integer(12)] {
+            doc.get_dictionary_mut(page)
+                .unwrap()
+                .set("Contents", invalid);
+            let before = doc.objects.clone();
+            assert!(wrap_page_contents(
+                &mut doc,
+                page,
+                PageTransform {
+                    scale: 2.0,
+                    tx: 0.0,
+                    ty: 0.0
+                }
+            )
+            .is_err());
+            assert_eq!(before, doc.objects);
+        }
+        let cyclic = doc.new_object_id();
+        doc.objects
+            .insert(cyclic, Object::Array(vec![cyclic.into()]));
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Contents", cyclic);
+        let before = doc.objects.clone();
+        assert!(wrap_page_contents(
+            &mut doc,
+            page,
+            PageTransform {
+                scale: 2.0,
+                tx: 0.0,
+                ty: 0.0
+            }
+        )
+        .is_err());
+        assert_eq!(before, doc.objects);
+    }
+
+    #[test]
+    fn structure_tag_switch_is_opt_in_and_tag_only_repairs_write_a_copy() {
+        let (mut doc, page) = cropped_page_document();
+        let root = doc.new_object_id();
+        let element =
+            doc.add_object(dictionary! {"S" => "Figure", "P" => root, "Pg" => page, "K" => 0});
+        doc.objects.insert(
+            root,
+            Object::Dictionary(
+                dictionary! {"Type" => "StructTreeRoot", "K" => vec![Object::Reference(element)]},
+            ),
+        );
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => (1,0), "StructTreeRoot" => root, "MarkInfo" => dictionary! {"Marked" => true}});
+        doc.trailer.set("Root", catalog);
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("StructParents", 0);
+        let before = doc.get_page_content(page).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "foliomend_tags_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("tags.pdf");
+        doc.save(&input).unwrap();
+        let options = ProcessOptions {
+            normalize_pages: false,
+            compress_images: false,
+            repair_pdf: false,
+            repair_bookmarks: false,
+            ..Default::default()
+        };
+        assert!(!options.repair_structure_tags);
+        assert!(
+            !serde_json::from_str::<ProcessOptions>("{}")
+                .unwrap()
+                .repair_structure_tags
+        );
+        let off =
+            process_pdf_with_options_and_progress(input.to_str().unwrap(), options, &mut |_| {});
+        assert!(off.success && off.output_bytes == 0);
+        assert_eq!(off.structure_tag_status, "未启用");
+        let repaired = process_pdf_with_options_and_progress(
+            input.to_str().unwrap(),
+            ProcessOptions {
+                repair_structure_tags: true,
+                ..options
+            },
+            &mut |_| {},
+        );
+        assert!(repaired.success && repaired.output_bytes > 0);
+        assert!(repaired.structure_tag_status.contains("已清理"));
+        let written = Document::load(&repaired.output_path).unwrap();
+        assert!(written.catalog().unwrap().get(b"StructTreeRoot").is_err());
+        assert_eq!(before, written.get_page_content(page).unwrap());
+        assert!(Document::load(&input)
+            .unwrap()
+            .catalog()
+            .unwrap()
+            .get(b"StructTreeRoot")
+            .is_ok());
+        let again = process_pdf_with_options_and_progress(
+            &repaired.output_path,
+            ProcessOptions {
+                repair_structure_tags: true,
+                ..options
+            },
+            &mut |_| {},
+        );
+        assert!(again.success && again.output_bytes == 0);
+        assert_eq!(again.structure_tag_status, "无结构标签");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn pdf_repair_switch_controls_recovery_and_repair_only_writes_a_copy() {
@@ -3444,6 +4095,7 @@ mod tests {
     #[test]
     fn test_classify_image_distinguishes_color_gray_and_monochrome() {
         let monochrome = DecodedImage {
+            preserve_separation: false,
             jpeg_quantization: None,
             width: 4,
             height: 1,
@@ -3453,6 +4105,7 @@ mod tests {
         assert_eq!(classify_image(&monochrome), ImageKind::Monochrome);
 
         let grayscale = DecodedImage {
+            preserve_separation: false,
             jpeg_quantization: None,
             width: 4,
             height: 1,
@@ -3465,6 +4118,7 @@ mod tests {
         assert_eq!(grayscale_plane.len(), 4);
 
         let color = DecodedImage {
+            preserve_separation: false,
             jpeg_quantization: None,
             width: 2,
             height: 1,
@@ -3478,6 +4132,7 @@ mod tests {
     fn cpu_fallback_preserves_pixels_dimensions_and_monochrome_row_padding() {
         let image = DecodedImage {
             jpeg_quantization: None,
+            preserve_separation: false,
             width: 9,
             height: 2,
             channels: 3,
@@ -3504,6 +4159,7 @@ mod tests {
     fn cpu_fallback_downsamples_large_scans_and_gpu_output_is_used() {
         let image = DecodedImage {
             jpeg_quantization: None,
+            preserve_separation: false,
             width: 2400,
             height: 1200,
             channels: 1,
@@ -3644,12 +4300,429 @@ mod tests {
             stream,
             DecodedImage {
                 jpeg_quantization: None,
+                preserve_separation: false,
                 width: 256,
                 height: 128,
                 channels,
                 pixels,
             },
         )
+    }
+
+    #[test]
+    fn paper_whitening_is_optional_validated_and_independent_of_compression_savings() {
+        let mut doc = Document::new();
+        let id = doc.add_object(Stream::new(
+            dictionary! {
+                "Width" => 1, "Height" => 1, "BitsPerComponent" => 8, "ColorSpace" => "DeviceGray"
+            },
+            vec![195],
+        ));
+        let options = ImageCompressionOptions {
+            gpu_acceleration: false,
+            jpeg_enabled: false,
+            downsample: false,
+            remove_paper_background: true,
+            ..Default::default()
+        };
+        let changed = process_image(&doc, id, options).transform.unwrap();
+        assert!(changed.change.background_cleaned);
+        assert!(changed.stream.content.len() > 1);
+        assert!(changed.stream.decompressed_content().unwrap()[0] > 195);
+        assert!(process_image(
+            &doc,
+            id,
+            ImageCompressionOptions {
+                remove_paper_background: false,
+                ..options
+            }
+        )
+        .transform
+        .is_none());
+        let defaults: ImageCompressionOptions = serde_json::from_str("{}").unwrap();
+        assert!(!defaults.remove_paper_background);
+        assert_eq!(defaults.paper_white_point, 205);
+        assert!(ImageCompressionOptions {
+            paper_white_point: 159,
+            ..options
+        }
+        .validate()
+        .is_err());
+        assert!(ImageCompressionOptions {
+            paper_white_point: 246,
+            ..options
+        }
+        .validate()
+        .is_err());
+    }
+
+    fn layered_paper_fixture() -> (Document, ObjectId, ObjectId, ObjectId) {
+        let (mut doc, page) = cropped_page_document();
+        let pixels: Vec<_> = (0..256 * 128).map(|n| (185 + n % 30) as u8).collect();
+        let background = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 256, "Height" => 128,
+                "BitsPerComponent" => 8, "ColorSpace" => "DeviceGray", "Filter" => "FlateDecode"
+            },
+            compress_flate(&pixels).unwrap(),
+        ));
+        let mask = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 768, "Height" => 384,
+                "BitsPerComponent" => 1, "ColorSpace" => "DeviceGray"
+            },
+            vec![255; 768 * 384 / 8],
+        ));
+        let foreground = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 768, "Height" => 384,
+                "BitsPerComponent" => 8, "ColorSpace" => "DeviceGray", "SMask" => mask
+            },
+            vec![40; 768 * 384],
+        ));
+        let contents = doc.add_object(Stream::new(
+            Dictionary::new(),
+            b"q 400 0 0 200 0 0 cm /Bg Do Q q 400 0 0 200 0 0 cm /Fg Do Q".to_vec(),
+        ));
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Contents", contents);
+        doc.get_dictionary_mut(page).unwrap().set(
+            "Resources",
+            dictionary! {
+                "XObject" => dictionary! {"Bg" => background, "Fg" => foreground}
+            },
+        );
+        (doc, page, background, foreground)
+    }
+
+    #[test]
+    fn near_white_layered_paper_is_protected_even_without_continuous_tone_regions() {
+        let (mut doc, page, background, _) = layered_paper_fixture();
+        let pixels: Vec<_> = (0..256 * 128)
+            .map(|n| {
+                if n % 32 < 10 {
+                    (237 + n % 10) as u8
+                } else {
+                    255
+                }
+            })
+            .collect();
+        let jpeg = encode_jpeg(&pixels, 256, 128, 1, 90).unwrap();
+        let stream = doc
+            .get_object_mut(background)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.set_plain_content(jpeg);
+        stream.dict.set("Filter", "DCTDecode");
+        let image = decode_image(
+            &doc,
+            doc.get_object(background).unwrap().as_stream().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            crate::image_protection::continuous_tone_fraction(&image.pixels, 256, 128, 1) < 0.03
+        );
+        assert!(layered_paper_image_ids(&doc, &[page]).contains(&background));
+        let before = doc.get_object(background).unwrap().clone();
+        let options = ImageCompressionOptions {
+            gpu_acceleration: false,
+            jpeg_quality: 75,
+            grayscale_reduction: ColorReduction::Levels16,
+            allow_color_to_gray: true,
+            color_pixel_percent: 100.0,
+            ..Default::default()
+        };
+        let protected = process_image_with_context(&doc, background, options, false, true);
+        assert!(protected.transform.is_none());
+        assert!(matches!(
+            protected.retention_reason,
+            Some(ImageRetentionReason::VisualPreservation)
+        ));
+        assert!(protected
+            .visual_protection
+            .unwrap()
+            .reason
+            .contains("保留浅色渐变"));
+        assert_eq!(doc.get_object(background).unwrap(), &before);
+        let unprotected = transformed_stream(
+            doc.get_object(background).unwrap().as_stream().unwrap(),
+            &image,
+            classify_image(&image),
+            ImageCompressionOptions {
+                protect_visual_images: false,
+                ..options
+            },
+        )
+        .unwrap();
+        assert!(unprotected.change.quantized);
+        let whitened = process_image_with_context(
+            &doc,
+            background,
+            ImageCompressionOptions {
+                remove_paper_background: true,
+                ..options
+            },
+            false,
+            true,
+        )
+        .transform
+        .unwrap();
+        assert!(whitened.change.background_cleaned);
+        assert!(!whitened.change.quantized && !whitened.change.binarized);
+    }
+
+    #[test]
+    fn layered_paper_supports_equal_resolution_masks_but_rejects_smaller_foregrounds() {
+        let (mut doc, page, background, foreground) = layered_paper_fixture();
+        let mask = doc
+            .get_object(foreground)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .dict
+            .get(b"SMask")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        for (width, height, expected) in [(256, 128, true), (255, 128, false), (256, 127, false)] {
+            for id in [foreground, mask] {
+                let stream = doc.get_object_mut(id).unwrap().as_stream_mut().unwrap();
+                stream.dict.set("Width", width);
+                stream.dict.set("Height", height);
+            }
+            assert_eq!(
+                layered_paper_image_ids(&doc, &[page]).contains(&background),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn equal_resolution_title_paper_can_be_whitened_without_modifying_text_or_mask() {
+        let (mut doc, page, background, foreground) = layered_paper_fixture();
+        let mask = doc
+            .get_object(foreground)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .dict
+            .get(b"SMask")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        for (id, pixels) in [
+            (foreground, vec![40; 256 * 128]),
+            (mask, vec![255; 256 * 128 / 8]),
+        ] {
+            let stream = doc.get_object_mut(id).unwrap().as_stream_mut().unwrap();
+            stream.dict.set("Width", 256);
+            stream.dict.set("Height", 128);
+            stream.set_plain_content(pixels);
+        }
+        let before_text = doc.get_object(foreground).unwrap().clone();
+        let before_mask = doc.get_object(mask).unwrap().clone();
+        let stream = doc.get_object(background).unwrap().as_stream().unwrap();
+        let image = decode_image(&doc, stream).unwrap();
+        assert!(
+            crate::image_protection::continuous_tone_fraction(&image.pixels, 256, 128, 1) >= 0.03
+        );
+        let options = ImageCompressionOptions {
+            gpu_acceleration: false,
+            remove_paper_background: true,
+            paper_white_point: 195,
+            ..Default::default()
+        };
+        // The old resolution rule left this under photo protection, which
+        // disables whitening even though the paper's pixel guard passes.
+        assert!(
+            !visual_image_options(&image, options, false)
+                .0
+                .remove_paper_background
+        );
+        let paper = layered_paper_image_ids(&doc, &[page]).contains(&background);
+        assert!(paper);
+        let work = process_image_with_context(&doc, background, options, false, paper);
+        let prepared = work.transform.unwrap();
+        assert!(prepared.change.background_cleaned);
+        assert!(!prepared.change.quantized && !prepared.change.binarized);
+        let cleaned = decode_image(&Document::new(), &prepared.stream).unwrap();
+        assert!(
+            grayscale_plane(&cleaned)
+                .iter()
+                .map(|&x| u64::from(x))
+                .sum::<u64>()
+                > grayscale_plane(&image)
+                    .iter()
+                    .map(|&x| u64::from(x))
+                    .sum::<u64>()
+        );
+        // Masks are reached through the protected foreground, rather than
+        // scheduled as independent painted images by optimize_images.
+        assert!(
+            process_image_with_context(&doc, foreground, options, false, false)
+                .transform
+                .is_none()
+        );
+        assert_eq!(doc.get_object(foreground).unwrap(), &before_text);
+        assert_eq!(doc.get_object(mask).unwrap(), &before_mask);
+        let disabled = process_image_with_context(
+            &doc,
+            background,
+            ImageCompressionOptions {
+                remove_paper_background: false,
+                ..options
+            },
+            false,
+            paper,
+        );
+        assert!(!disabled
+            .transform
+            .is_some_and(|t| t.change.background_cleaned));
+    }
+
+    #[test]
+    fn paper_layer_bypasses_smooth_tone_protection_but_preserves_covers_and_masks() {
+        let (doc, page, background, foreground) = layered_paper_fixture();
+        assert_eq!(
+            layered_paper_image_ids(&doc, &[page]),
+            BTreeSet::from([background])
+        );
+        let options = ImageCompressionOptions {
+            gpu_acceleration: false,
+            remove_paper_background: true,
+            ..Default::default()
+        };
+        let body = process_image_with_context(&doc, background, options, false, true);
+        assert!(body.transform.unwrap().change.background_cleaned);
+        let cover = process_image_with_context(&doc, background, options, true, true);
+        assert!(!cover.transform.is_some_and(|t| t.change.background_cleaned));
+        let photo = process_image_with_context(&doc, background, options, false, false);
+        assert!(!photo.transform.is_some_and(|t| t.change.background_cleaned));
+        let text = process_image_with_context(&doc, foreground, options, false, false);
+        assert!(text.transform.is_none());
+        assert!(matches!(
+            text.retention_reason,
+            Some(ImageRetentionReason::Protected)
+        ));
+    }
+
+    #[test]
+    fn paper_layer_context_requires_overlay_alignment_order_and_safe_shared_uses() {
+        let (mut doc, page, background, _) = layered_paper_fixture();
+        let original = doc.get_dictionary(page).unwrap().clone();
+        for bytes in [
+            b"q 400 0 0 200 0 0 cm /Bg Do Q q 400 0 0 200 100 0 cm /Fg Do Q".as_slice(),
+            b"q 400 0 0 200 0 0 cm /Fg Do /Bg Do Q",
+            b"q 400 0 0 200 0 0 cm /Bg Do /Fg Do Q /Bg Do",
+        ] {
+            let contents = doc.add_object(Stream::new(Dictionary::new(), bytes.to_vec()));
+            doc.get_dictionary_mut(page)
+                .unwrap()
+                .set("Contents", contents);
+            assert!(layered_paper_image_ids(&doc, &[page]).is_empty());
+        }
+        doc.objects
+            .insert(page, Object::Dictionary(original.clone()));
+        let mut second = original;
+        let contents = doc.add_object(Stream::new(Dictionary::new(), b"/Bg Do".to_vec()));
+        second.set("Contents", contents);
+        let second = doc.add_object(second);
+        assert!(!layered_paper_image_ids(&doc, &[page, second]).contains(&background));
+        // A candidate also drawn by an unknown Form must keep photo protection.
+        let form = doc.add_object(Stream::new(
+            dictionary! {"Subtype" => "Form"},
+            b"/Bg Do".to_vec(),
+        ));
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .get_mut(b"Resources")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .get_mut(b"XObject")
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Fm", form);
+        let contents = doc.add_object(Stream::new(
+            Dictionary::new(),
+            b"q 400 0 0 200 0 0 cm /Bg Do /Fg Do Q /Fm Do".to_vec(),
+        ));
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Contents", contents);
+        assert!(layered_paper_image_ids(&doc, &[page]).is_empty());
+    }
+
+    #[test]
+    fn paper_whitening_keeps_larger_pdf_outputs_and_reports_actual_changes() {
+        let (mut doc, page) = cropped_page_document();
+        let catalog = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => (1,0)});
+        doc.trailer.set("Root", catalog);
+        let id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => 1, "Height" => 1,
+                "BitsPerComponent" => 8, "ColorSpace" => "DeviceGray"
+            },
+            vec![195],
+        ));
+        doc.get_dictionary_mut(page).unwrap().set(
+            "Resources",
+            dictionary! {"XObject" => dictionary! {"Bg" => id}},
+        );
+        let contents = doc.add_object(Stream::new(Dictionary::new(), b"/Bg Do".to_vec()));
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Contents", contents);
+        doc.prune_objects();
+        let dir = std::env::temp_dir().join(format!(
+            "foliomend_paper_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("paper.pdf");
+        doc.save(&input).unwrap();
+        let result = process_pdf_with_options_and_progress(
+            input.to_str().unwrap(),
+            ProcessOptions {
+                normalize_pages: false,
+                repair_pdf: false,
+                repair_bookmarks: false,
+                image_compression: ImageCompressionOptions {
+                    gpu_acceleration: false,
+                    jpeg_enabled: false,
+                    downsample: false,
+                    protect_visual_images: false,
+                    remove_paper_background: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            &mut |_| {},
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert!(result.output_bytes >= result.original_bytes);
+        let mut stats = result.image_statistics.unwrap();
+        assert_eq!(stats.background_cleaned_images, 1);
+        assert!(std::path::Path::new(&result.output_path).exists());
+        let written = Document::load(&result.output_path).unwrap();
+        assert!(
+            decode_image(
+                &written,
+                written.get_object(id).unwrap().as_stream().unwrap()
+            )
+            .unwrap()
+            .pixels[0]
+                > 195
+        );
+        stats.discard_changes();
+        assert_eq!(stats.background_cleaned_images, 0);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -3754,6 +4827,7 @@ mod tests {
                 ..Default::default()
             },
             true,
+            false,
         );
         assert!(shared.visual_protection.unwrap().reason.contains("首尾页"));
         let blank = doc.add_object(Stream::new(Dictionary::new(), Vec::new()));
@@ -3803,6 +4877,7 @@ mod tests {
                 ..Default::default()
             },
             true,
+            false,
         );
         assert!(result.visual_protection.is_some());
         assert_eq!(
@@ -4121,6 +5196,122 @@ mod tests {
             assert_eq!(retained.content, original.content);
             assert_eq!(retained.dict, original.dict);
         }
+    }
+
+    #[test]
+    fn separation_keeps_tint_mapping_when_reencoding_samples() {
+        let mut doc = Document::new();
+        let tint = doc.add_object(dictionary! {
+            "FunctionType" => 2,
+            "Domain" => vec![0.into(), 1.into()],
+            "C0" => vec![0.into(), 0.into(), 0.into(), 0.into()],
+            "C1" => vec![0.into(), 0.into(), 0.into(), 1.into()],
+            "N" => 1,
+        });
+        let separation = doc.add_object(vec![
+            Object::Name(b"Separation".to_vec()),
+            Object::Name(b"Black".to_vec()),
+            Object::Name(b"DeviceCMYK".to_vec()),
+            tint.into(),
+        ]);
+        let decode = doc.add_object(vec![1.into(), 0.into()]);
+        let pixels: Vec<u8> = (0..=255).cycle().take(256 * 128).collect();
+        let stream = Stream::new(
+            dictionary! {
+                "Subtype" => "Image",
+                "Width" => 256,
+                "Height" => 128,
+                "BitsPerComponent" => 8,
+                "ColorSpace" => separation,
+                "Decode" => decode,
+            },
+            pixels.clone(),
+        );
+        let image = doc.add_object(stream.clone());
+        for jpeg_enabled in [false, true] {
+            let options = ImageCompressionOptions {
+                jpeg_enabled,
+                protect_visual_images: false,
+                remove_paper_background: true,
+                grayscale_reduction: ColorReduction::Monochrome,
+                ..Default::default()
+            };
+            let transformed = process_image(&doc, image, options).transform.unwrap();
+            assert_eq!(
+                transformed.stream.dict.get(b"ColorSpace").unwrap(),
+                &separation.into()
+            );
+            assert_eq!(
+                transformed.stream.dict.get(b"Decode").unwrap(),
+                &decode.into()
+            );
+            assert_eq!(transformed.change.bits_per_pixel, 8);
+            assert!(!transformed.change.color_converted);
+            assert!(!transformed.change.binarized);
+            assert!(!transformed.change.background_cleaned);
+            if !jpeg_enabled {
+                assert_eq!(
+                    decode_image(&doc, &transformed.stream).unwrap().pixels,
+                    pixels
+                );
+            }
+        }
+        let mut masked = stream;
+        masked.dict.set("SMask", doc.add_object(Object::Null));
+        let masked = doc.add_object(masked);
+        let outcome = process_image(&doc, masked, Default::default());
+        assert!(matches!(
+            outcome.retention_reason,
+            Some(ImageRetentionReason::Protected)
+        ));
+    }
+
+    #[test]
+    fn only_identical_reachable_embedded_font_streams_are_merged() {
+        let (mut doc, page) = cropped_page_document();
+        let pages = doc
+            .get_dictionary(page)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .clone();
+        let root = doc.add_object(dictionary! {"Type" => "Catalog", "Pages" => pages});
+        doc.trailer.set("Root", root);
+        let font_data = Stream::new(dictionary! {"Subtype" => "Type1C"}, vec![9, 8, 7]);
+        let first = doc.add_object(font_data.clone());
+        let second = doc.add_object(font_data.clone());
+        let unreferenced = doc.add_object(font_data.clone());
+        doc.add_object(dictionary! {"Type" => "FontDescriptor", "FontFile3" => unreferenced});
+        let mut different = font_data;
+        different.dict.set("Subtype", "OpenType");
+        let different = doc.add_object(different);
+        let mut fonts = Dictionary::new();
+        let mut descriptors = Vec::new();
+        for (name, id) in [("A", first), ("B", second), ("C", different)] {
+            let descriptor =
+                doc.add_object(dictionary! {"Type" => "FontDescriptor", "FontFile3" => id});
+            descriptors.push(descriptor);
+            let font =
+                doc.add_object(dictionary! {"Type" => "Font", "FontDescriptor" => descriptor});
+            fonts.set(name, font);
+        }
+        doc.get_dictionary_mut(page)
+            .unwrap()
+            .set("Resources", dictionary! {"Font" => fonts});
+
+        assert_eq!(deduplicate_font_streams(&mut doc), (1, 3));
+        doc.prune_objects();
+        assert!(!doc.objects.contains_key(&second));
+        for (descriptor, expected) in descriptors.into_iter().zip([first, first, different]) {
+            assert_eq!(
+                doc.get_dictionary(descriptor)
+                    .unwrap()
+                    .get(b"FontFile3")
+                    .unwrap(),
+                &expected.into()
+            );
+        }
+        assert_eq!(deduplicate_font_streams(&mut doc), (0, 0));
     }
 
     #[test]
@@ -4454,6 +5645,7 @@ mod tests {
         let (original, _) = advanced_image_fixture(3);
         let image = DecodedImage {
             jpeg_quantization: None,
+            preserve_separation: false,
             width: 256,
             height: 128,
             channels: 3,
@@ -4495,6 +5687,7 @@ mod tests {
         let (original, _) = advanced_image_fixture(3);
         let image = DecodedImage {
             jpeg_quantization: None,
+            preserve_separation: false,
             width: 256,
             height: 128,
             channels: 3,
@@ -4573,6 +5766,7 @@ mod tests {
         // Near-monochrome 8-bit input must retain gray edge pixels at every numeric level.
         let image = DecodedImage {
             jpeg_quantization: None,
+            preserve_separation: false,
             width: 256,
             height: 128,
             channels: 1,

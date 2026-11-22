@@ -2,9 +2,11 @@ mod bookmark_repair;
 mod gpu_images;
 mod image_protection;
 mod jpeg_quantization;
+mod paper_background;
 mod pdf_image_filters;
 mod pdf_processor;
 mod pdf_repair;
+mod structure_tags;
 
 use pdf_processor::{ProcessOptions, ProcessResult, ProcessingProgress};
 use serde::Serialize;
@@ -54,6 +56,14 @@ async fn process_pdfs(
 ) -> Vec<ProcessResult> {
     tauri::async_runtime::spawn_blocking(move || {
         let file_count = paths.len();
+        if options.overwrite_original && !app.dialog()
+            .message(format!("将原位覆盖所选的 {} 个 PDF，不添加后缀，也不保留原文件副本。只有实际生成并保留的处理结果才会替换原文件。\n\n是否继续？取消将不处理任何文件。", file_count))
+            .title("确认原位覆盖")
+            .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom("覆盖并处理".into(), "取消".into()))
+            .blocking_show()
+        {
+            return Vec::new();
+        }
         let _ = app.emit(
             "pdf-progress",
             BatchProgress {
@@ -98,7 +108,7 @@ async fn process_pdfs(
                         options,
                         &mut report_progress,
                         &mut || app.dialog()
-                            .message(format!("{}\n\n书签自动修复未能可靠恢复原有结构。是否清理全部书签？清理会移除所有现有书签，但保留页面内容，只写入输出副本。取消将保留原有书签并继续其他处理。", path))
+                            .message(format!("{}\n\n书签自动修复未能可靠恢复原有结构。是否清理全部书签？清理会移除所有现有书签，但保留页面内容。{}取消将保留原有书签并继续其他处理。", path, if options.overwrite_original { "处理成功后将覆盖原文件。" } else { "只写入输出副本。" }))
                             .title("书签修复失败")
                             .buttons(tauri_plugin_dialog::MessageDialogButtons::OkCancelCustom("清理书签".into(), "保留书签".into()))
                             .blocking_show(),
@@ -121,9 +131,12 @@ async fn process_pdfs(
                         image_acceleration: "未完成检测".to_string(),
                         image_statistics: None,
                         image_settings: None,
+                        duplicate_font_streams: 0,
+                        duplicate_font_bytes: 0,
                         original_bytes: 0,
                         output_bytes: 0,
                         pdf_repair_status: "未完成检测".to_string(),
+                        structure_tag_status: "未完成检测".to_string(),
                         bookmark_status: "未完成检测".to_string(),
                         bookmarks_fit_width: 0,
                         bookmarks_fit_width_skipped: 0,
@@ -172,9 +185,12 @@ async fn process_pdfs(
                         image_acceleration: "未完成检测".to_string(),
             image_statistics: None,
             image_settings: None,
+            duplicate_font_streams: 0,
+            duplicate_font_bytes: 0,
             original_bytes: 0,
             output_bytes: 0,
             pdf_repair_status: "未完成检测".to_string(),
+            structure_tag_status: "未完成检测".to_string(),
             bookmark_status: "未完成检测".to_string(),
             bookmarks_fit_width: 0,
             bookmarks_fit_width_skipped: 0,
